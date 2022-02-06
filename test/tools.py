@@ -35,6 +35,7 @@ import asv
 from asv import util
 from asv import commands
 from asv import config
+from asv import environment
 from asv import runner
 from asv.commands.preview import create_httpd
 from asv.repo import get_repo
@@ -63,11 +64,23 @@ except (RuntimeError, IOError):
     HAS_PYPY = hasattr(sys, 'pypy_version_info') and (sys.version_info[:2] == (2, 7))
 
 
+def _check_conda():
+    from asv.plugins.conda import _conda_lock
+    conda = _find_conda()
+    with _conda_lock():
+        try:
+            subprocess.check_call([conda, 'build', '--version'],
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError:
+            raise RuntimeError("conda-build is missing")
+
+
 try:
     # Conda can install required Python versions on demand
-    _find_conda()
+    _check_conda()
     HAS_CONDA = True
-except (RuntimeError, IOError):
+except (RuntimeError, IOError) as exc:
     HAS_CONDA = False
 
 
@@ -96,31 +109,21 @@ except ImportError:
 WAIT_TIME = 20.0
 
 
-class DummyLock(object):
-    def __init__(self, filename):
-        pass
-    def acquire(self, timeout=None):
-        pass
-    def release(self):
-        pass
+from filelock import FileLock
 
-try:
-    from lockfile import LockFile
-except ImportError:
-    LockFile = DummyLock
+
+def get_default_environment_type(conf, python):
+    return environment.get_environment_class(conf, python).tool_name
 
 
 @contextmanager
 def locked_cache_dir(config, cache_key, timeout=900, tag=None):
-    if LockFile is DummyLock:
-        cache_key = cache_key + os.environ.get('PYTEST_XDIST_WORKER', '')
-
     base_dir = config.cache.makedir(cache_key)
 
     lockfile = join(six.text_type(base_dir), 'lock')
     cache_dir = join(six.text_type(base_dir), 'cache')
 
-    lock = LockFile(lockfile)
+    lock = FileLock(lockfile)
     lock.acquire(timeout=timeout)
     try:
         # Clear cache dir contents if it was generated with different
@@ -444,7 +447,7 @@ def generate_repo_from_ops(tmpdir, dvcs_type, operations):
     return dvcs
 
 
-def generate_result_dir(tmpdir, dvcs, values, branches=None):
+def generate_result_dir(tmpdir, dvcs, values, branches=None, updated=None):
     result_dir = join(tmpdir, "results")
     os.makedirs(result_dir)
     html_dir = join(tmpdir, "html")
@@ -468,26 +471,30 @@ def generate_result_dir(tmpdir, dvcs, values, branches=None):
         'version': 1,
     })
 
-    timestamp = datetime.datetime.utcnow()
+    if updated is None:
+        updated = datetime.datetime(1970, 1, 1)
 
     benchmark_version = sha256(os.urandom(16)).hexdigest()
 
-    params = None
+    params = []
     param_names = None
     for commit, value in values.items():
         if isinstance(value, dict):
             params = value["params"]
+            value = value["result"]
+        else:
+            value = [value]
         result = Results({"machine": "tarzan"}, {}, commit,
-                         repo.get_date_from_name(commit), "2.7", None)
+                         repo.get_date_from_name(commit), "2.7", None, {})
         value = runner.BenchmarkResult(
-            result=[value],
-            samples=[None],
-            number=[None],
+            result=value,
+            samples=[None]*len(value),
+            number=[None]*len(value),
             errcode=0,
             stderr='',
             profile=None)
-        result.add_result({"name": "time_func", "version": benchmark_version, "params": []},
-                          value, started_at=timestamp, ended_at=timestamp)
+        result.add_result({"name": "time_func", "version": benchmark_version, "params": params},
+                          value, started_at=updated, duration=1.0)
         result.save(result_dir)
 
     if params:
@@ -502,6 +509,30 @@ def generate_result_dir(tmpdir, dvcs, values, branches=None):
         }
     }, api_version=2)
     return conf
+
+
+@pytest.fixture(scope="session")
+def example_results(request):
+    with locked_cache_dir(request.config, "example-results") as cache_dir:
+        src = abspath(join(dirname(__file__), 'example_results'))
+        dst = abspath(join(cache_dir, 'results'))
+
+        if os.path.isdir(dst):
+            return dst
+
+        shutil.copytree(src, dst)
+
+        src_machine = join(dirname(__file__), 'asv-machine.json')
+        dst_machine = join(cache_dir, 'asv-machine.json')
+        shutil.copyfile(src_machine, dst_machine)
+
+        # Convert to current file format
+        conf = config.Config.from_json({'results_dir': dst,
+                                        'repo': 'none',
+                                        'project': 'asv'})
+        run_asv_with_conf(conf, 'update', _machine_file=dst_machine)
+
+        return dst
 
 
 @pytest.fixture(scope="session")
@@ -523,6 +554,7 @@ def browser(request, pytestconfig):
     def ChromeHeadless():
         options = selenium.webdriver.ChromeOptions()
         options.add_argument('headless')
+        options.add_experimental_option('w3c', False)
         return selenium.webdriver.Chrome(options=options)
 
     ns = {}
@@ -684,6 +716,7 @@ def _build_dummy_wheels(tmpdir, wheel_dir, to_build, build_conda=False):
 
 def _build_dummy_conda_pkg(name, version, build_dir, dst):
     # Build fake conda packages for testing
+    from asv.plugins.conda import _conda_lock
 
     build_dir = os.path.abspath(build_dir)
 
@@ -713,9 +746,10 @@ def _build_dummy_conda_pkg(name, version, build_dir, dst):
     conda = _find_conda()
 
     for pyver in [PYTHON_VER1, PYTHON_VER2]:
-        subprocess.check_call([conda, 'build',
-                               '--output-folder=' + dst,
-                               '--no-anaconda-upload',
-                               '--python=' + pyver,
-                               '.'],
-                              cwd=build_dir)
+        with _conda_lock():
+            subprocess.check_call([conda, 'build',
+                                   '--output-folder=' + dst,
+                                   '--no-anaconda-upload',
+                                   '--python=' + pyver,
+                                   '.'],
+                                  cwd=build_dir)

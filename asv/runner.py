@@ -101,8 +101,7 @@ def skip_benchmarks(benchmarks, env, results=None):
             r = fail_benchmark(benchmark)
             results.add_result(benchmark, r,
                                selected_idx=benchmarks.benchmark_selection.get(name),
-                               started_at=started_at,
-                               ended_at=datetime.datetime.utcnow())
+                               started_at=started_at)
 
     return results
 
@@ -143,7 +142,7 @@ def run_benchmarks(benchmarks, env, results=None,
         Whether to retain any previously measured result samples
         and use them in statistics computations.
     run_rounds : sequence of int, optional
-        Run rounds for benchmarks with multiple processes.
+        Run rounds for benchmarks with multiple rounds.
         If None, run all rounds.
     launch_method : {'auto', 'spawn', 'forkserver'}, optional
         Benchmark launching method to use.
@@ -164,7 +163,7 @@ def run_benchmarks(benchmarks, env, results=None,
         extra_params['number'] = 1
         extra_params['repeat'] = 1
         extra_params['warmup_time'] = 0
-        extra_params['processes'] = 1
+        extra_params['rounds'] = 1
 
     if results is None:
         results = Results.unnamed()
@@ -173,14 +172,14 @@ def run_benchmarks(benchmarks, env, results=None,
     setup_cache_timeout = {}
     benchmark_order = {}
     cache_users = {}
-    max_processes = 0
+    max_rounds = 0
 
-    def get_processes(benchmark):
-        """Get number of processes to use for a job"""
-        if 'processes' in extra_params:
-            return int(extra_params['processes'])
+    def get_rounds(benchmark):
+        """Get number of rounds to use for a job"""
+        if 'rounds' in extra_params:
+            return int(extra_params['rounds'])
         else:
-            return int(benchmark.get('processes', 1))
+            return int(benchmark.get('rounds', 1))
 
     for name, benchmark in sorted(six.iteritems(benchmarks)):
         key = benchmark.get('setup_cache_key')
@@ -188,11 +187,11 @@ def run_benchmarks(benchmarks, env, results=None,
                                                      benchmark['timeout']),
                                        setup_cache_timeout.get(key, 0))
         benchmark_order.setdefault(key, []).append((name, benchmark))
-        max_processes = max(max_processes, get_processes(benchmark))
+        max_rounds = max(max_rounds, get_rounds(benchmark))
         cache_users.setdefault(key, set()).add(name)
 
     if run_rounds is None:
-        run_rounds = list(range(1, max_processes + 1))
+        run_rounds = list(range(1, max_rounds + 1))
 
     # Interleave benchmark runs, in setup_cache order
     existing_results = results.get_result_keys(benchmarks)
@@ -203,9 +202,9 @@ def run_benchmarks(benchmarks, env, results=None,
                 for name, benchmark in benchmark_set:
                     log.step()
 
-                    processes = get_processes(benchmark)
+                    rounds = get_rounds(benchmark)
 
-                    if run_round > processes:
+                    if run_round > rounds:
                         if (not append_samples and
                                 run_round == run_rounds[-1] and
                                 name in existing_results):
@@ -229,6 +228,8 @@ def run_benchmarks(benchmarks, env, results=None,
         previous_result_keys = existing_results
     else:
         previous_result_keys = set()
+
+    benchmark_durations = {}
 
     log.info("Benchmarking {0}".format(env.name))
 
@@ -265,7 +266,6 @@ def run_benchmarks(benchmarks, env, results=None,
                 results.add_result(benchmark, res,
                                    selected_idx=selected_idx,
                                    started_at=started_at,
-                                   ended_at=datetime.datetime.utcnow(),
                                    record_samples=record_samples)
                 failed_benchmarks.add(name)
             return results
@@ -292,10 +292,10 @@ def run_benchmarks(benchmarks, env, results=None,
                 cache_dir = cache_dirs[setup_cache_key]
             elif setup_cache_key not in failed_setup_cache:
                 partial_info_time = None
-                short_key = os.path.relpath(setup_cache_key, benchmarks.benchmark_dir)
-                log.info("Setting up {0}".format(short_key), reserve_space=True)
+                log.info("Setting up {0}".format(setup_cache_key), reserve_space=True)
+                params_str = json.dumps({'cpu_affinity': extra_params.get('cpu_affinity')})
                 cache_dir, stderr = spawner.create_setup_cache(
-                    name, setup_cache_timeout[setup_cache_key])
+                    name, setup_cache_timeout[setup_cache_key], params_str)
                 if cache_dir is not None:
                     log.add_padded('ok')
                     cache_dirs[setup_cache_key] = cache_dir
@@ -306,6 +306,10 @@ def run_benchmarks(benchmarks, env, results=None,
                             log.error(stderr)
                     failed_setup_cache[setup_cache_key] = stderr
 
+                duration = (datetime.datetime.utcnow() - started_at).total_seconds()
+                results.set_setup_cache_duration(setup_cache_key, duration)
+                started_at = datetime.datetime.utcnow()
+
             if setup_cache_key in failed_setup_cache:
                 # Mark benchmark as failed
                 partial_info_time = None
@@ -315,7 +319,6 @@ def run_benchmarks(benchmarks, env, results=None,
                 results.add_result(benchmark, res,
                                    selected_idx=selected_idx,
                                    started_at=started_at,
-                                   ended_at=datetime.datetime.utcnow(),
                                    record_samples=record_samples)
                 failed_benchmarks.add(name)
                 continue
@@ -348,11 +351,18 @@ def run_benchmarks(benchmarks, env, results=None,
                                 extra_params=cur_extra_params,
                                 cwd=cache_dir)
 
+            # Retain runtime durations
+            ended_at = datetime.datetime.utcnow()
+            if name in benchmark_durations:
+                benchmark_durations[name] += (ended_at - started_at).total_seconds()
+            else:
+                benchmark_durations[name] = (ended_at - started_at).total_seconds()
+
             # Save result
             results.add_result(benchmark, res,
                                selected_idx=selected_idx,
                                started_at=started_at,
-                               ended_at=datetime.datetime.utcnow(),
+                               duration=benchmark_durations[name],
                                record_samples=(not is_final or record_samples),
                                append_samples=(name in previous_result_keys))
 
@@ -420,6 +430,16 @@ def log_benchmark_result(results, benchmark, show_stderr=False):
 
     # Dump program output
     stderr = results.stderr.get(benchmark['name'])
+    errcode = results.errcode.get(benchmark['name'])
+
+    if errcode not in (None, 0, util.TIMEOUT_RETCODE, JSON_ERROR_RETCODE):
+        # Display also error code
+        if not stderr:
+            stderr = ""
+        else:
+            stderr += "\n"
+        stderr += "asv: benchmark failed (exit status {})".format(errcode)
+
     if stderr and show_stderr:
         with log.indent():
             log.error(stderr)
@@ -664,31 +684,41 @@ class Spawner(object):
     def interrupt(self):
         self.interrupted = True
 
-    def create_setup_cache(self, benchmark_id, timeout):
+    def create_setup_cache(self, benchmark_id, timeout, params_str):
         cache_dir = tempfile.mkdtemp()
+
+        env_vars = dict(os.environ)
+        env_vars.update(self.env.env_vars)
 
         out, _, errcode = self.env.run(
             [BENCHMARK_RUN_SCRIPT, 'setup_cache',
              os.path.abspath(self.benchmark_dir),
-             benchmark_id],
+             benchmark_id, params_str],
             dots=False, display_error=False,
             return_stderr=True, valid_return_codes=None,
             redirect_stderr=True,
-            cwd=cache_dir, timeout=timeout)
+            cwd=cache_dir,
+            timeout=timeout,
+            env=env_vars)
 
         if errcode == 0:
             return cache_dir, None
         else:
             util.long_path_rmtree(cache_dir, True)
+            out += '\nasv: setup_cache failed (exit status {})'.format(errcode)
             return None, out.strip()
 
     def run(self, name, params_str, profile_path, result_file_name, timeout, cwd):
+        env_vars = dict(os.environ)
+        env_vars.update(self.env.env_vars)
+
         out, _, errcode = self.env.run(
             [BENCHMARK_RUN_SCRIPT, 'run', os.path.abspath(self.benchmark_dir),
              name, params_str, profile_path, result_file_name],
             dots=False, timeout=timeout,
             display_error=False, return_stderr=True, redirect_stderr=True,
-            valid_return_codes=None, cwd=cwd)
+            valid_return_codes=None, cwd=cwd,
+            env=env_vars)
         return out, errcode
 
     def preimport(self):
@@ -708,9 +738,14 @@ class ForkServer(Spawner):
         self.tmp_dir = tempfile.mkdtemp(prefix='asv-forkserver-')
         self.socket_name = os.path.join(self.tmp_dir, 'socket')
 
+        env_vars = dict(os.environ)
+        env_vars.update(env.env_vars)
+
         self.server_proc = env.run(
             [BENCHMARK_RUN_SCRIPT, 'run_server', self.benchmark_dir, self.socket_name],
-            return_popen=True, redirect_stderr=True)
+            return_popen=True,
+            redirect_stderr=True,
+            env=env_vars)
 
         self._server_output = None
         self.stdout_reader_thread = threading.Thread(target=self._stdout_reader)

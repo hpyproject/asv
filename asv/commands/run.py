@@ -8,7 +8,9 @@ import os
 import sys
 import logging
 import traceback
-import itertools
+import time
+import argparse
+import textwrap
 
 from collections import defaultdict
 
@@ -26,27 +28,35 @@ from .. import environment
 from .. import util
 
 from .setup import Setup
+from .show import Show
 
 from . import common_args
 
 
 def _do_build(args):
     env, conf, repo, commit_hash = args
+    started_at = time.time()
+    success = False
     try:
         with log.set_level(logging.WARN):
             env.install_project(conf, repo, commit_hash)
+        success = True
     except util.ProcessError:
-        return (env.name, False)
-    return (env.name, True)
+        pass
+    duration = time.time() - started_at
+    return (env.name, (success, duration))
 
 
-def _do_build_multiprocess(args):
+def _do_build_multiprocess(args_sets):
     """
     multiprocessing callback to build the project in one particular
     environment.
     """
     try:
-        return _do_build(args)
+        res = []
+        for args in args_sets:
+            res.append(_do_build(args))
+        return res
     except BaseException as exc:
         raise util.ParallelFailure(str(exc), exc.__class__, traceback.format_exc())
 
@@ -56,23 +66,45 @@ class Run(Command):
     def setup_arguments(cls, subparsers):
         parser = subparsers.add_parser(
             "run", help="Run a benchmark suite",
-            description="Run a benchmark suite.")
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            description=textwrap.dedent(
+                """
+                Run a benchmark suite.
 
+                examples:
+                  asv run master             run for one branch
+                  asv run master^!           run for one commit (git)
+                  asv run "--merges master"  run for only merge commits (git)
+                """))
+
+        cls._setup_arguments(parser)
+
+        parser.set_defaults(func=cls.run_from_args)
+
+        return parser
+
+    @classmethod
+    def _setup_arguments(cls, parser, env_default_same=False):
         parser.add_argument(
             'range', nargs='?', default=None,
             help="""Range of commits to benchmark.  For a git
             repository, this is passed as the first argument to ``git
-            log``.  See 'specifying ranges' section of the
-            `gitrevisions` manpage for more info.  Also accepts the
+            rev-list``; or Mercurial log command. See 'specifying ranges'
+            section of the `gitrevisions` manpage, or 'hg help revisions',
+            for more info. Also accepts the
             special values 'NEW', 'ALL', 'EXISTING', and 'HASHFILE:xxx'.
             'NEW' will benchmark all commits since the latest
             benchmarked on this machine.  'ALL' will benchmark all
             commits in the project. 'EXISTING' will benchmark against
             all commits for which there are existing benchmarks on any
             machine. 'HASHFILE:xxx' will benchmark only a specific set
-            of hashes given in the file named 'xxx', which must have
-            one hash per line. By default, will benchmark the head of
-            each configured of the branches.""")
+            of hashes given in the file named 'xxx' ('-' means stdin),
+            which must have one hash per line. By default, will benchmark
+            the head of each configured of the branches.""")
+        parser.add_argument(
+            "--date-period", type=common_args.time_period, default=None,
+            help="""Pick only one commit in each given time period.
+            For example: 1d (daily), 1w (weekly), 1y (yearly).""")
         parser.add_argument(
             "--steps", "-s", type=common_args.positive_int, default=None,
             help="""Maximum number of steps to benchmark.  This is
@@ -86,12 +118,16 @@ class Run(Command):
         common_args.add_parallel(parser)
         common_args.add_show_stderr(parser)
         parser.add_argument(
+            "--durations", action="store", metavar='N', nargs='?',
+            type=common_args.positive_int_or_inf, default=0, const='all',
+            help="Display total duration for N (or 'all') slowest benchmarks")
+        parser.add_argument(
             "--quick", "-q", action="store_true",
             help="""Do a "quick" run, where each benchmark function is
             run only once.  This is useful to find basic errors in the
             benchmark functions faster.  The results are unlikely to
             be useful, and thus are not saved.""")
-        common_args.add_environment(parser)
+        common_args.add_environment(parser, default_same=env_default_same)
         parser.add_argument(
             "--set-commit-hash", default=None,
             help="""Set the commit hash to use when recording benchmark
@@ -121,24 +157,31 @@ class Run(Command):
             or failed results""")
         common_args.add_record_samples(parser)
         parser.add_argument(
-            "--interleave-processes", action="store_true", default=False,
-            help="""Interleave benchmarks with multiple processes across
+            "--interleave-rounds", action="store_true", default=False,
+            help="""Interleave benchmarks with multiple rounds across
             commits. This can avoid measurement biases from commit ordering,
             can take longer.""")
         parser.add_argument(
-            "--no-interleave-processes", action="store_false", dest="interleave_processes")
+            "--no-interleave-rounds", action="store_false", dest="interleave_rounds")
+        # Backward compatibility for '--(no-)interleave-rounds'
+        parser.add_argument(
+            "--interleave-processes", action="store_true", default=False, dest="interleave_rounds",
+            help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--no-interleave-processes", action="store_false", dest="interleave_rounds",
+            help=argparse.SUPPRESS)
         parser.add_argument(
             "--no-pull", action="store_true",
             help="Do not pull the repository")
-
-        parser.set_defaults(func=cls.run_from_args)
-
-        return parser
+        parser.add_argument(
+            "--strict", action="store_true",
+            help="When set true the run command will exit with a non-zero "
+                 "return code if any benchmark is in a failed state")
 
     @classmethod
     def run_from_conf_args(cls, conf, args, **kwargs):
         return cls.run(
-            conf=conf, range_spec=args.range, steps=args.steps,
+            conf=conf, range_spec=args.range, steps=args.steps, date_period=args.date_period,
             bench=args.bench, attribute=args.attribute, parallel=args.parallel,
             show_stderr=args.show_stderr, quick=args.quick,
             profile=args.profile, env_spec=args.env_spec, set_commit_hash=args.set_commit_hash,
@@ -147,18 +190,19 @@ class Run(Command):
             skip_failed=args.skip_existing_failed or args.skip_existing,
             skip_existing_commits=args.skip_existing_commits,
             record_samples=args.record_samples, append_samples=args.append_samples,
-            pull=not args.no_pull, interleave_processes=args.interleave_processes,
-            launch_method=args.launch_method,
-            **kwargs
+            pull=not args.no_pull, interleave_rounds=args.interleave_rounds,
+            launch_method=args.launch_method, durations=args.durations,
+            strict=args.strict, **kwargs
         )
 
     @classmethod
-    def run(cls, conf, range_spec=None, steps=None, bench=None, attribute=None, parallel=1,
+    def run(cls, conf, range_spec=None, steps=None, date_period=None,
+            bench=None, attribute=None, parallel=1,
             show_stderr=False, quick=False, profile=False, env_spec=None, set_commit_hash=None,
             dry_run=False, machine=None, _machine_file=None, skip_successful=False,
             skip_failed=False, skip_existing_commits=False, record_samples=False,
-            append_samples=False, pull=True, interleave_processes=False,
-            launch_method=None, _returns={}):
+            append_samples=False, pull=True, interleave_rounds=False,
+            launch_method=None, durations=0, strict=False, _returns={}):
         machine_params = Machine.load(
             machine_name=machine,
             _path=_machine_file, interactive=True)
@@ -173,15 +217,15 @@ class Run(Command):
         has_existing_env = any(isinstance(env, environment.ExistingEnvironment)
                                for env in environments)
 
-        if interleave_processes:
+        if interleave_rounds:
             if dry_run:
-                raise util.UserError("--interleave-commits and --dry-run cannot be used together")
+                raise util.UserError("--interleave-rounds and --dry-run cannot be used together")
             if has_existing_env:
-                raise util.UserError("--interleave-commits cannot be used with existing environment "
+                raise util.UserError("--interleave-rounds cannot be used with existing environment "
                                      "(or python=same)")
-        elif interleave_processes is None:
+        elif interleave_rounds is None:
             # Enable if possible
-            interleave_processes = not (dry_run or has_existing_env)
+            interleave_rounds = not (dry_run or has_existing_env)
 
         if append_samples:
             record_samples = True
@@ -189,6 +233,15 @@ class Run(Command):
         repo = get_repo(conf)
         if pull:
             repo.pull()
+
+        if set_commit_hash is not None:
+            set_commit_hash = repo.get_hash_from_name(set_commit_hash)
+
+        # Track failures across the run command
+        failures = False
+
+        # Comparison period for date_period filtering
+        old_commit_hashes = None
 
         if range_spec is None:
             try:
@@ -199,8 +252,8 @@ class Run(Command):
             commit_hashes = get_existing_hashes(conf.results_dir)
         elif range_spec == "NEW":
             # New commits on each configured branches
-            commit_hashes = repo.get_new_branch_commits(
-                conf.branches, get_existing_hashes(conf.results_dir))
+            old_commit_hashes = get_existing_hashes(conf.results_dir)
+            commit_hashes = repo.get_new_branch_commits(conf.branches, old_commit_hashes)
         elif range_spec == "ALL":
             # All commits on each configured branches
             commit_hashes = repo.get_new_branch_commits(conf.branches, [])
@@ -214,18 +267,29 @@ class Run(Command):
             else:
                 log.error('Requested commit hash file "{}" is not a file'.format(hashfn))
                 return 1
-            commit_hashes = [h.strip() for h in hashstr.split("\n") if h.strip()]
+            commit_hashes = []
+            for h in hashstr.split("\n"):
+                h = h.strip()
+                if h:
+                    try:
+                        commit_hashes.append(repo.get_hash_from_name(h))
+                    except NoSuchNameError:
+                        log.warning("Unknown commit hash {0} in input file".format(h))
         elif isinstance(range_spec, list):
             commit_hashes = range_spec
         else:
             commit_hashes = repo.get_hashes_from_range(range_spec)
 
-        if len(commit_hashes) == 0:
-            log.error("No commit hashes selected")
-            return 1
+        if date_period is not None:
+            commit_hashes = repo.filter_date_period(commit_hashes, date_period,
+                                                    old_commit_hashes)
 
         if steps is not None:
             commit_hashes = util.pick_n(commit_hashes, steps)
+
+        if len(commit_hashes) == 0:
+            log.error("No commit hashes selected")
+            return 1
 
         Setup.perform_setup(environments, parallel=parallel)
         if len(environments) == 0:
@@ -264,13 +328,13 @@ class Run(Command):
         _returns['environments'] = environments
         _returns['machine_params'] = machine_params.__dict__
 
-        if attribute and 'processes' in attribute:
-            max_processes = int(attribute['processes'])
+        if attribute and 'rounds' in attribute:
+            max_rounds = int(attribute['rounds'])
         else:
-            max_processes = max(b.get('processes', 1)
-                                for b in six.itervalues(benchmarks))
+            max_rounds = max(b.get('rounds', 1)
+                             for b in six.itervalues(benchmarks))
 
-        log.set_nitems(steps * max_processes)
+        log.set_nitems(steps * max_rounds)
 
         skipped_benchmarks = defaultdict(lambda: set())
 
@@ -299,28 +363,30 @@ class Run(Command):
                 except IOError:
                     pass
 
-        if interleave_processes:
-            run_round_set = [[j] for j in range(max_processes, 0, -1)]
+        if interleave_rounds:
+            run_round_set = [[j] for j in range(max_rounds, 0, -1)]
         else:
             run_round_set = [None]
 
         def iter_rounds_commits():
             for run_rounds in run_round_set:
-                if interleave_processes and run_rounds[0] % 2 == 0:
+                if interleave_rounds and run_rounds[0] % 2 == 0:
                     for commit_hash in commit_hashes[::-1]:
                         yield run_rounds, commit_hash
                 else:
                     for commit_hash in commit_hashes:
                         yield run_rounds, commit_hash
 
+        build_durations = defaultdict(lambda: 0)
+
         for run_rounds, commit_hash in iter_rounds_commits():
             if commit_hash in skipped_benchmarks:
                 for env in environments:
                     for bench in benchmarks:
-                        if interleave_processes:
+                        if interleave_rounds:
                             log.step()
                         else:
-                            for j in range(max_processes):
+                            for j in range(max_rounds):
                                 log.step()
                 continue
 
@@ -328,10 +394,10 @@ class Run(Command):
                 skip_list = skipped_benchmarks[(commit_hash, env.name)]
                 for bench in benchmarks:
                     if bench in skip_list:
-                        if interleave_processes:
+                        if interleave_rounds:
                             log.step()
                         else:
-                            for j in range(max_processes):
+                            for j in range(max_rounds):
                                 log.step()
 
             active_environments = [env for env in environments
@@ -342,10 +408,10 @@ class Run(Command):
                 continue
 
             if commit_hash:
-                if interleave_processes:
+                if interleave_rounds:
                     round_info = " (round {}/{})".format(
-                        max_processes - run_rounds[0] + 1,
-                        max_processes)
+                        max_rounds - run_rounds[0] + 1,
+                        max_rounds)
                 else:
                     round_info = ""
 
@@ -358,23 +424,34 @@ class Run(Command):
 
                 for subenv in util.iter_chunks(active_environments, parallel):
 
-                    successes = dict([(env.name, env.installed_commit_hash == commit_hash)
+                    successes = dict([(env.name, (env.installed_commit_hash == commit_hash, 0))
                                       for env in subenv])
 
-                    subenv_name = ', '.join([x.name for x in subenv
-                                             if not successes.get(env.name)])
+                    env_to_install = [env for env in subenv
+                                      if env.installed_commit_hash != commit_hash]
+
+                    subenv_name = ', '.join([x.name for x in env_to_install])
 
                     if subenv_name:
                         log.info("Building for {0}".format(subenv_name))
 
                     with log.indent():
-                        args = [(env, conf, repo, commit_hash) for env in subenv
-                                if not successes.get(env.name)]
+                        args = [(env, conf, repo, commit_hash) for env in env_to_install]
+
                         if parallel != 1:
+                            # Parallel run only for environments with different dir_names
+                            args_sets = defaultdict(list)
+                            for arg in args:
+                                args_sets[arg[0].dir_name].append(arg)
+                            args_sets = args_sets.values()
+
                             try:
-                                pool = multiprocessing.Pool(parallel)
+                                pool = util.get_multiprocessing_pool(parallel)
                                 try:
-                                    successes.update(dict(pool.map(_do_build_multiprocess, args)))
+                                    res = []
+                                    for r in pool.map(_do_build_multiprocess, args_sets):
+                                        res.extend(r)
+                                    successes.update(dict(res))
                                     pool.close()
                                     pool.join()
                                 finally:
@@ -385,7 +462,11 @@ class Run(Command):
                             successes.update(dict(map(_do_build, args)))
 
                     for env in subenv:
-                        success = successes[env.name]
+                        success, duration = successes[env.name]
+
+                        build_duration_key = (commit_hash, env.name)
+                        build_durations[build_duration_key] += duration
+                        build_duration = build_durations[build_duration_key]
 
                         params = dict(machine_params.__dict__)
                         params['python'] = env.python
@@ -406,18 +487,23 @@ class Run(Command):
                             commit_hash,
                             repo.get_date(commit_hash),
                             env.python,
-                            env.name)
+                            env.name,
+                            env.env_vars
+                        )
 
                         if not skip_save:
                             result.load_data(conf.results_dir)
+
+                        if build_duration != 0:
+                            result.set_build_duration(build_duration)
 
                         # If we are interleaving commits, we need to
                         # append samples (except for the first round)
                         # and record samples (except for the final
                         # round).
-                        force_append_samples = (interleave_processes and
-                                                run_rounds[0] < max_processes)
-                        force_record_samples = (interleave_processes and
+                        force_append_samples = (interleave_rounds and
+                                                run_rounds[0] < max_rounds)
+                        force_record_samples = (interleave_rounds and
                                                 run_rounds[0] > 1)
 
                         if success:
@@ -434,3 +520,34 @@ class Run(Command):
 
                         if not skip_save:
                             result.save(conf.results_dir)
+
+                        if strict:
+                            failures = failures or any(
+                                code != 0 for code in result.errcode.values())
+
+                        if durations > 0:
+                            duration_set = Show._get_durations([(machine, result)], benchmark_set)
+                            log.info(cls.format_durations(duration_set[(machine, env.name)], durations))
+
+        if failures and strict:
+            return 2
+
+    @classmethod
+    def format_durations(cls, durations, num_durations):
+        items = list(durations.items())
+        items.sort(key=lambda x: (-x[1], x[0]))
+
+        rows = [["benchmark", "total duration"]]
+        total = 0
+
+        for j, (name, duration) in enumerate(items):
+            if j >= num_durations:
+                rows.append(["...", "..."])
+                break
+            rows.append([name, util.human_time(duration)])
+
+        total = sum(durations.values())
+        rows.append(["total", util.human_time(total)])
+
+        msg = util.format_text_table(rows, num_headers=1)
+        return msg

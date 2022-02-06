@@ -137,7 +137,7 @@ applies to in two ways:
   included in the timing of the benchmark.
 
 A separate cache is used for each environment and each commit of the
-project begin tested and is thrown out between benchmark runs.
+project being tested and is thrown out between benchmark runs.
 
 For example, caching data in a pickle::
 
@@ -229,7 +229,9 @@ as skipped for the parameter values in question.
 
 The parameter values can be any Python objects. However, it is often
 best to use only strings or numbers, because these have simple
-unambiguous text representations.
+unambiguous text representations. In the event the ``repr()`` output
+is non-unique, the representations will be made unique by suffixing
+an integer identifier corresponding to the order of appearance.
 
 When you have multiple parameters, the test is run for all
 of their combinations::
@@ -264,12 +266,19 @@ Timing
 
 Timing benchmarks have the prefix ``time``.
 
-The timing itself is based on the Python standard library's `timeit`
-module, with some extensions for automatic heuristics shamelessly
-stolen from IPython's `%timeit
-<http://ipython.org/ipython-doc/dev/api/generated/IPython.core.magics.execution.html?highlight=timeit#IPython.core.magics.execution.ExecutionMagics.timeit>`__
-magic function.  This means that in most cases the benchmark function
-itself will be run many times to achieve accurate timing.
+How ASV runs benchmarks is as follows (pseudocode for main idea)::
+
+     for round in range(`rounds`):
+        for benchmark in benchmarks:
+            with new process:
+                <calibrate `number` if not manually set>
+                for j in range(`repeat`):
+                    <setup `benchmark`>
+                    sample = timing_function(<run benchmark `number` times>) / `number`
+                    <teardown `benchmark`>
+
+where the actual `rounds`, `repeat`, and `number` are :doc:`attributes
+of the benchmark <benchmarks>`.
 
 The default timing function is `timeit.default_timer`, which uses the
 highest resolution clock available on a given platform to measure the
@@ -309,7 +318,7 @@ How ``setup`` and ``teardown`` behave for timing benchmarks
 is similar to the Python ``timeit`` module, and the behavior is controlled
 by the ``number`` and ``repeat`` attributes.
 
-For the list of attributes, see :doc:`benchmarks`.
+For the list of benchmark attributes, see :doc:`benchmarks`.
 
 .. _memory-benchmarks:
 
@@ -369,6 +378,59 @@ memory usage you want to track::
    way to avoid this is to use ``setup_cache`` instead.
 
 For details, see :doc:`benchmarks`.
+
+
+.. _raw-timing-benchmarks:
+
+Raw timing benchmarks
+`````````````````````
+
+For some timing benchmarks, for example measuring the time it takes to
+import a module, it is important that they are run separately in a new
+Python process.
+
+Measuring execution time for benchmarks run once in a new Python process
+can be done with ``timeraw_*`` timing benchmarks::
+
+    def timeraw_import_inspect():
+        return """
+        import inspect
+        """
+
+Note that these benchmark functions should return a string,
+corresponding to the code that will be run.
+
+Importing a module takes a meaningful amount of time only the first time
+it is executed, therefore a fresh interpreter is used for each iteration of
+the benchmark. The string returned by the benchmark function is executed in a
+subprocess.
+
+Note that the setup and setup_cache are performed in the base benchmark
+process, so that the setup done by them is not available in the benchmark code.
+To perform setup also in the benchmark itself, you can return a second string:
+
+    def timeraw_import_inspect():
+        code = "import inspect"
+        setup = "import ast"
+        return code, setup
+
+The raw timing benchmarks have the same parameters as ordinary timing benchmarks,
+but ``number`` is by default 1, and ``timer`` is ignored.
+
+.. note::
+
+   Timing standard library modules is possible as long as they are not
+   `built-in`_ or brought in by importing the ``timeit`` module (which
+   further imports ``gc``, ``sys``, ``time``, and ``itertools``).
+
+.. _built-in: https://hg.python.org/cpython/file/tip/Modules/Setup.dist
+
+
+Imports
+```````
+
+You can use raw timing benchmarks to measure import times.
+
 
 .. _tracking:
 

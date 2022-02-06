@@ -6,6 +6,7 @@ from __future__ import (absolute_import, division, print_function,
 
 import logging
 import traceback
+from collections import defaultdict
 
 from . import Command
 from ..console import log
@@ -20,9 +21,10 @@ def _create(env):
         env.create()
 
 
-def _create_parallel(env):
+def _create_parallel(envs):
     try:
-        _create(env)
+        for env in envs:
+            _create(env)
     except BaseException as exc:
         raise util.ParallelFailure(str(exc), exc.__class__, traceback.format_exc())
 
@@ -53,7 +55,7 @@ class Setup(Command):
     @classmethod
     def run(cls, conf, parallel=-1, env_spec=None):
         environments = list(environment.get_environments(conf, env_spec))
-        cls.perform_setup(environments)
+        cls.perform_setup(environments, parallel=parallel)
         return environments
 
     @classmethod
@@ -68,9 +70,15 @@ class Setup(Command):
         with log.indent():
             if parallel != 1:
                 try:
-                    pool = multiprocessing.Pool(parallel)
+                    # Run creation in parallel only for environments with
+                    # different dir_names
+                    environment_groups = defaultdict(list)
+                    for env in environments:
+                        environment_groups[env.dir_name].append(env)
+
+                    pool = util.get_multiprocessing_pool(parallel)
                     try:
-                        pool.map(_create_parallel, environments)
+                        pool.map(_create_parallel, environment_groups.values())
                         pool.close()
                         pool.join()
                     finally:

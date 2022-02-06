@@ -34,7 +34,7 @@ ON_PYPY = hasattr(sys, 'pypy_version_info')
 class ResultsWrapper(object):
     tuple_type = collections.namedtuple('tuple_type', ['result', 'stats', 'samples',
                                                        'params', 'stderr', 'errcode',
-                                                       'profile', 'started_at', 'ended_at'])
+                                                       'profile', 'started_at', 'duration'])
 
     def __init__(self, results, benchmarks):
         self.results = results
@@ -58,7 +58,7 @@ class ResultsWrapper(object):
                                profile=(self.results.get_profile(key)
                                         if self.results.has_profile(key) else None),
                                started_at=self.results.started_at[key],
-                               ended_at=self.results.ended_at[key])
+                               duration=self.results.duration.get(key))
 
 
 @pytest.mark.flaky(reruns=1, reruns_delay=5)
@@ -91,7 +91,7 @@ def test_run_benchmarks(benchmarks_fixture, tmpdir):
     assert times[
         'time_examples.TimeSuite.time_example_benchmark_1'].result != [None]
     stats = results.get_result_stats(name, b[name]['params'])
-    assert isinstance(stats[0]['std'], float)
+    assert isinstance(stats[0]['q_25'], float)
     # The exact number of samples may vary if the calibration is not fully accurate
     samples = results.get_result_samples(name, b[name]['params'])
     assert len(samples[0]) >= 4
@@ -112,6 +112,10 @@ def test_run_benchmarks(benchmarks_fixture, tmpdir):
     assert times['time_secondary.track_value'].profile is not None
     assert isinstance(times['time_examples.time_with_warnings'].stderr, type(''))
     assert times['time_examples.time_with_warnings'].errcode != 0
+    assert times['time_secondary.track_fail_errcode_123'].errcode == 123
+    if hasattr(os, 'kill') and hasattr(os, 'getpid'):
+        expected = -9 if os.name != "nt" else 9
+        assert times['time_secondary.track_fail_signal_9'].errcode == expected
 
     assert times['time_examples.TimeWithBadTimer.time_it'].result == [0.0]
 
@@ -170,8 +174,10 @@ def test_run_benchmarks(benchmarks_fixture, tmpdir):
     # Check run time timestamps
     for name, result in times.items():
         assert result.started_at >= util.datetime_to_js_timestamp(start_timestamp)
-        assert result.ended_at >= result.started_at
-        assert result.ended_at <= util.datetime_to_js_timestamp(end_timestamp)
+        if any(x is not None for x in result.result):
+            assert result.duration >= 0
+        else:
+            assert result.duration is None or result.duration >= 0
 
 
 def test_quick(benchmarks_fixture):
@@ -243,7 +249,7 @@ def test_forkserver(tmpdir):
     with open(os.path.join('benchmark', 'unimportable.py'), 'w') as f:
         f.write("raise RuntimeError('not importable')")
 
-    env = environment.ExistingEnvironment(conf, sys.executable, {})
+    env = environment.ExistingEnvironment(conf, sys.executable, {}, {})
     spawner = runner.ForkServer(env, os.path.abspath('benchmark'))
 
     result_file = os.path.join(tmpdir, 'run-result')
@@ -297,7 +303,7 @@ def test_forkserver_preimport(tmpdir):
     d['repo'] = 'None'
     conf = config.Config.from_json(d)
 
-    env = environment.ExistingEnvironment(conf, sys.executable, {})
+    env = environment.ExistingEnvironment(conf, sys.executable, {}, {})
 
     #
     # Normal benchmark suite
@@ -431,3 +437,16 @@ def test_run_import_failure(capsys, benchmarks_fixture, launch_method):
 
     text, err = capsys.readouterr()
     assert 'hello import' in text
+
+
+def test_timeraw_benchmark(benchmarks_fixture):
+    conf, repo, envs, commit_hash = benchmarks_fixture
+
+    b = benchmarks.Benchmarks.discover(conf, repo, envs, [commit_hash], regex='TimerawSuite')
+    results = runner.run_benchmarks(b, envs[0], show_stderr=True)
+    times = ResultsWrapper(results, b)
+
+    assert times['timeraw_examples.TimerawSuite.timeraw_fresh'].result is not None
+    assert times['timeraw_examples.TimerawSuite.timeraw_setup'].result is not None
+    assert 'timed out' in times['timeraw_examples.TimerawSuite.timeraw_timeout'].stderr
+    assert '0' * 7 * 3 in times['timeraw_examples.TimerawSuite.timeraw_count'].stderr

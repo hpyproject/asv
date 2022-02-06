@@ -28,10 +28,16 @@ from . import build_cache
 WIN = (os.name == "nt")
 
 
-def iter_requirement_matrix(environment_type, pythons, conf, explicit_selection=False):
+def iter_matrix(environment_type, pythons, conf, explicit_selection=False):
     """
     Iterate through all combinations of the given requirement
     matrix and python versions.
+
+    Yields
+    ------
+    combination : dict of {(key_type, key_name): value, ...}
+        Combination of environment settings.
+        Possible key types are ('req', 'env', 'env_nobuild', 'python').
     """
 
     env_classes = {}
@@ -45,24 +51,25 @@ def iter_requirement_matrix(environment_type, pythons, conf, explicit_selection=
         return env_type
 
     platform_keys = {
-        'environment_type': environment_type,
-        'sys_platform': sys.platform
+        ('environment_type', None): environment_type,
+        ('sys_platform', None): sys.platform
     }
 
-    # Parse input
-    keys = sorted(conf.matrix.keys())
-    values = [conf.matrix[key] for key in keys]
-    values = [value if isinstance(value, list) else [value]
-              for value in values]
-    values = [[''] if value == [] else value
-              for value in values]
+    # Parse requirement matrix
+    parsed_matrix = _parse_matrix(conf.matrix)
+    keys = list(parsed_matrix.keys())
+    values = list(parsed_matrix.values())
+
+    # Convert values to lists in the expected format
+    values = [value if isinstance(value, list) else [value] for value in values]
+    values = [[''] if value == [] else value for value in values]
 
     # Process excludes
     for python in pythons:
         empty_matrix = True
 
         # Cartesian product of everything
-        all_keys = ['python'] + keys
+        all_keys = [('python', None)] + keys
         all_combinations = itertools.product([python], *values)
 
         for combination in all_combinations:
@@ -71,13 +78,14 @@ def iter_requirement_matrix(environment_type, pythons, conf, explicit_selection=
 
             if not environment_type:
                 try:
-                    target['environment_type'] = get_env_type(target['python'])
+                    target[('environment_type', None)] = get_env_type(target[('python', None)])
                 except EnvironmentUnavailable as err:
                     log.warning(str(err))
                     continue
 
             for rule in conf.exclude:
                 # check if all fields in the rule match
+                rule = _parse_exclude_include_rule(rule)
                 if match_rule(target, rule):
                     # rule matched
                     break
@@ -90,24 +98,21 @@ def iter_requirement_matrix(environment_type, pythons, conf, explicit_selection=
         # If the user explicitly selected environment/python, yield it
         # even if matrix contains no packages to be installed
         if empty_matrix and explicit_selection:
-            yield dict(python=python)
+            yield {('python', None): python}
 
     # Process includes, unless explicit selection
     if explicit_selection:
         return
 
     for include in conf.include:
-        if 'python' not in include:
-            raise util.UserError("include rule '{0}' does not specify Python version".format(include))
-
-        include = dict(include)
+        include = _parse_exclude_include_rule(include, is_include=True)
 
         # Platform keys in include statement act as matching rules
         target = dict(platform_keys)
 
         if not environment_type:
             try:
-                target['environment_type'] = get_env_type(include['python'])
+                target[('environment_type', None)] = get_env_type(include[('python', None)])
             except EnvironmentUnavailable as err:
                 log.warning(str(err))
                 continue
@@ -127,6 +132,93 @@ def iter_requirement_matrix(environment_type, pythons, conf, explicit_selection=
             yield include
 
 
+def _parse_matrix(matrix, bare_keys=()):
+    """
+    Parse 'matrix' and include/exclude rule configuration entries.
+
+    It is in format::
+
+         {"key_type1": {"key1": value1, "key2, value2, ...},
+          ...,
+          "nondict_key1": nondict_value1,
+          ...}
+
+    or in legacy format::
+
+         {"key1": value1, ..., "nondict_key1": nondict_value1, ...}
+
+    in which the key type is assumed to be "req".
+
+    Parameters
+    ----------
+    matrix
+        Configuration matrix or rule entry
+    bare_keys : iterable
+        Non-dictionary key values to store as is
+
+    Returns
+    -------
+    parsed_matrix
+        Dictionary {(key_type, key): value, ...}
+
+    """
+    matrix = dict(matrix)
+    result = {}
+
+    # Insert non-dict ("bare") keys first
+    for key in bare_keys:
+        if key in matrix:
+            result[key, None] = matrix.pop(key)
+
+    # Insert remaining matrix entries
+    matrix_types = ('req', 'env', 'env_nobuild')
+    if any(t in matrix for t in matrix_types):
+        # New-style config
+        matrices = []
+        for t in matrix_types:
+            submatrix = matrix.pop(t, {})
+            matrices.append((t, submatrix))
+
+        # Check if spurious keys left
+        remaining_keys = tuple(matrix.keys())
+        if remaining_keys:
+            raise util.UserError('Unknown keys in "matrix" configuration: {}, expected: {}'.format(
+                remaining_keys, matrix_types + tuple(bare_keys)))
+    else:
+        # Backward-compatibility for old-style config
+        matrices = [('req', matrix)]
+
+    # Convert values
+    for t, m in matrices:
+        for key, value in m.items():
+            result[t, key] = value
+
+    return result
+
+
+def _parse_exclude_include_rule(rule, is_include=False):
+    """
+    Parse exclude/include rule by adding key types.
+
+    Parameters
+    ----------
+    rule : dict
+        Keys must be str, values must be str or None.
+        The keys 'python', 'environment_type', 'sys_platform',
+        are parsed specially and result to the corresponding key types.
+
+    Returns
+    -------
+    rule : dict
+        Dictionary of {(key_type, key): value, ...}
+    """
+    if is_include and 'python' not in rule:
+        raise util.UserError("include rule '{0}' does not specify Python version".format(rule))
+
+    bare_keys = ('python', 'environment_type', 'sys_platform')
+    return _parse_matrix(rule, bare_keys)
+
+
 def match_rule(target, rule):
     """
     Match rule to a target.
@@ -134,14 +226,14 @@ def match_rule(target, rule):
     Parameters
     ----------
     target : dict
-        Dictionary containing [(key, value), ...].
-        Keys must be str, values must be str or None.
+        Dictionary containing [((key_type, key), value), ...].
     rule : dict
-        Dictionary containing [(key, match), ...], to be matched
+        Dictionary containing [((key_type, key), match), ...], to be matched
         to *target*. Match can be str specifying a regexp that must
         match target[key], or None. None matches either None
         or a missing key in *target*. If match is not None,
         and the key is missing in *target*, the rule does not match.
+        The key_type must match exactly.
 
     Returns
     -------
@@ -166,9 +258,15 @@ def match_rule(target, rule):
     return True
 
 
-def get_env_name(tool_name, python, requirements):
+def get_env_name(tool_name, python, requirements, tagged_env_vars, build=False):
     """
     Get a name to uniquely identify an environment.
+
+    Parameters
+    ----------
+    build : bool
+        Whether to omit non-build environment variables.
+        The canonical name of the environment is the name with build=False.
     """
     if tool_name:
         name = [tool_name]
@@ -184,7 +282,23 @@ def get_env_name(tool_name, python, requirements):
             name.append(''.join([key, val]))
         else:
             name.append(key)
+
+    env_vars = _untag_env_vars(tagged_env_vars, build=build)
+
+    for env_var, value in sorted(six.iteritems(env_vars)):
+        name.append(''.join([env_var, value]))
+
     return util.sanitize_filename('-'.join(name))
+
+
+def _untag_env_vars(tagged_env_vars, build=False):
+    vars = {}
+
+    for (tag, key), value in six.iteritems(tagged_env_vars):
+        if not build or tag == 'build':
+            vars[key] = value
+
+    return vars
 
 
 def get_environments(conf, env_specifiers, verbose=True):
@@ -243,14 +357,14 @@ def get_environments(conf, env_specifiers, verbose=True):
                 pythons = conf.pythons
 
         if env_type != "existing":
-            requirements_iter = iter_requirement_matrix(env_type, pythons, conf,
-                                                        explicit_selection)
+            requirements_iter = iter_matrix(env_type, pythons, conf,
+                                            explicit_selection)
         else:
             # Ignore requirement matrix
-            requirements_iter = [dict(python=python) for python in pythons]
+            requirements_iter = [{('python', None): python} for python in pythons]
 
-        for requirements in requirements_iter:
-            python = requirements.pop('python')
+        for entries in requirements_iter:
+            python, requirements, tagged_env_vars = _parse_matrix_entries(entries)
 
             try:
                 if env_type:
@@ -258,10 +372,33 @@ def get_environments(conf, env_specifiers, verbose=True):
                 else:
                     cls = get_environment_class(conf, python)
 
-                yield cls(conf, python, requirements)
+                yield cls(conf, python, requirements, tagged_env_vars)
             except EnvironmentUnavailable as err:
                 if verbose:
                     log.warning(str(err))
+
+
+def _parse_matrix_entries(entries):
+    """
+    Parse mixed requirement / environment variable matrix entries
+    to requirements and tagged environment variables.
+    """
+    python = None
+    requirements = {}
+    tagged_env_vars = {}
+    for (key_type, key), value in entries.items():
+        if key_type == 'python':
+            python = value
+        elif key_type == 'env':
+            tagged_env_vars[("build", key)] = value
+        elif key_type == 'env_nobuild':
+            tagged_env_vars[("nobuild", key)] = value
+        elif key_type == 'req':
+            requirements[key] = value
+        else:
+            # Shouldn't happen
+            raise ValueError("Invalid matrix key type {0}".format(key))
+    return python, requirements, tagged_env_vars
 
 
 def get_environment_class(conf, python):
@@ -297,7 +434,7 @@ def get_environment_class(conf, python):
         classes.insert(0, cls)
 
     for cls in classes:
-        if cls.matches(python):
+        if cls.matches_python_fallback and cls.matches(python):
             return cls
     raise EnvironmentUnavailable(
         "No way to create environment for python='{0}'".format(python))
@@ -332,8 +469,9 @@ class Environment(object):
     project.
     """
     tool_name = None
+    matches_python_fallback = True
 
-    def __init__(self, conf, python, requirements):
+    def __init__(self, conf, python, requirements, tagged_env_vars):
         """
         Get an environment for a given requirement matrix and
         Python version specifier.
@@ -351,6 +489,9 @@ class Environment(object):
         requirements : dict (str -> str)
             Mapping from package names to versions
 
+        tagged_env_vars : dict (tag, key) -> value
+            Environment variables, tagged for build vs. non-build
+
         Raises
         ------
         EnvironmentUnavailable
@@ -360,8 +501,9 @@ class Environment(object):
         self._env_dir = conf.env_dir
         self._repo_subdir = conf.repo_subdir
         self._install_timeout = conf.install_timeout  # GH391
+        self._tagged_env_vars = tagged_env_vars
         self._path = os.path.abspath(os.path.join(
-            self._env_dir, self.hashname))
+            self._env_dir, self.dir_name))
         self._project = conf.project
 
         self._is_setup = False
@@ -373,33 +515,33 @@ class Environment(object):
         self._install_command = conf.install_command
         self._uninstall_command = conf.uninstall_command
 
-        self._env_vars = {}
-        self._env_vars['ASV'] = 'true'
-        self._env_vars['ASV_PROJECT'] = conf.project
-        self._env_vars['ASV_CONF_DIR'] = os.path.abspath(os.getcwd())
-        self._env_vars['ASV_ENV_NAME'] = self.name
-        self._env_vars['ASV_ENV_DIR'] = self._path
-        self._env_vars['ASV_ENV_TYPE'] = self.tool_name
+        self._global_env_vars = {}
+        self._global_env_vars['ASV'] = 'true'
+        self._global_env_vars['ASV_PROJECT'] = conf.project
+        self._global_env_vars['ASV_CONF_DIR'] = os.path.abspath(os.getcwd())
+        self._global_env_vars['ASV_ENV_NAME'] = self.name
+        self._global_env_vars['ASV_ENV_DIR'] = self._path
+        self._global_env_vars['ASV_ENV_TYPE'] = self.tool_name
 
         installed_commit_hash = self._get_installed_commit_hash()
         self._set_commit_hash(installed_commit_hash)
 
     def _set_commit_hash(self, commit_hash):
         if commit_hash is None:
-            self._env_vars.pop('ASV_COMMIT', None)
+            self._global_env_vars.pop('ASV_COMMIT', None)
         else:
-            self._env_vars['ASV_COMMIT'] = commit_hash
+            self._global_env_vars['ASV_COMMIT'] = commit_hash
 
     def _set_build_dirs(self, build_dir, cache_dir):
         if build_dir is None:
-            self._env_vars.pop('ASV_BUILD_DIR', None)
+            self._global_env_vars.pop('ASV_BUILD_DIR', None)
         else:
-            self._env_vars['ASV_BUILD_DIR'] = build_dir
+            self._global_env_vars['ASV_BUILD_DIR'] = build_dir
 
         if cache_dir is None:
-            self._env_vars.pop('ASV_BUILD_CACHE_DIR', None)
+            self._global_env_vars.pop('ASV_BUILD_CACHE_DIR', None)
         else:
-            self._env_vars['ASV_BUILD_CACHE_DIR'] = cache_dir
+            self._global_env_vars['ASV_BUILD_CACHE_DIR'] = cache_dir
 
     def _set_installed_commit_hash(self, commit_hash):
         # Save status
@@ -450,7 +592,10 @@ class Environment(object):
         """
         Get a name to uniquely identify this environment.
         """
-        return get_env_name(self.tool_name, self._python, self._requirements)
+        return get_env_name(self.tool_name,
+                            self._python,
+                            self._requirements,
+                            self._tagged_env_vars)
 
     @property
     def hashname(self):
@@ -460,8 +605,36 @@ class Environment(object):
         return hashlib.md5(self.name.encode('utf-8')).hexdigest()
 
     @property
+    def dir_name(self):
+        """
+        Get the name of the directory where the environment resides.
+        This is not necessarily unique, and may be shared across
+        different environments.
+        """
+        name = get_env_name(self.tool_name,
+                            self._python,
+                            self._requirements,
+                            self._tagged_env_vars,
+                            build=True)
+        return hashlib.md5(name.encode('utf-8')).hexdigest()
+
+    @property
     def requirements(self):
         return self._requirements
+
+    @property
+    def env_vars(self):
+        """
+        All environment variables configured in the matrix.
+        """
+        return _untag_env_vars(self._tagged_env_vars, build=False)
+
+    @property
+    def build_env_vars(self):
+        """
+        Build-time environment variables configured in the matrix.
+        """
+        return _untag_env_vars(self._tagged_env_vars, build=True)
 
     @property
     def python(self):
@@ -482,7 +655,8 @@ class Environment(object):
         expected_info = {
             'tool_name': self.tool_name,
             'python': self._python,
-            'requirements': self._requirements
+            'requirements': self._requirements,
+            'build_env_vars': self.build_env_vars
         }
 
         if info != expected_info:
@@ -575,7 +749,7 @@ class Environment(object):
         # All environment variables are available as interpolation variables,
         # lowercased without the prefix.
         kwargs = dict()
-        for key, value in self._env_vars.items():
+        for key, value in self._global_env_vars.items():
             if key == 'ASV':
                 continue
             assert key.startswith('ASV_')
@@ -595,11 +769,13 @@ class Environment(object):
         # Interpolate, and raise useful error message if it fails
         return [util.interpolate_command(c, kwargs) for c in commands]
 
-    def _interpolate_and_run_commands(self, commands, default_cwd):
+    def _interpolate_and_run_commands(self, commands, default_cwd, extra_env=None):
         interpolated = self._interpolate_commands(commands)
 
         for cmd, env, return_codes, cwd in interpolated:
             environ = dict(os.environ)
+            if extra_env is not None:
+                environ.update(extra_env)
             environ.update(env)
             if cwd is None:
                 cwd = default_cwd
@@ -670,7 +846,8 @@ class Environment(object):
         if cmd:
             commit_name = repo.get_decorated_hash(commit_hash, 8)
             log.info("Installing {0} into {1}".format(commit_name, self.name))
-            self._interpolate_and_run_commands(cmd, default_cwd=build_dir)
+            self._interpolate_and_run_commands(cmd, default_cwd=build_dir,
+                                               extra_env=self.build_env_vars)
 
     def _uninstall_project(self):
         """
@@ -687,7 +864,8 @@ class Environment(object):
 
         if cmd:
             log.info("Uninstalling from {0}".format(self.name))
-            self._interpolate_and_run_commands(cmd, default_cwd=self._env_dir)
+            self._interpolate_and_run_commands(cmd, default_cwd=self._env_dir,
+                                               extra_env=self.build_env_vars)
 
     def _build_project(self, repo, commit_hash, build_dir):
         """
@@ -702,7 +880,8 @@ class Environment(object):
         if cmd:
             commit_name = repo.get_decorated_hash(commit_hash, 8)
             log.info("Building {0} for {1}".format(commit_name, self.name))
-            self._interpolate_and_run_commands(cmd, default_cwd=build_dir)
+            self._interpolate_and_run_commands(cmd, default_cwd=build_dir,
+                                               extra_env=self.build_env_vars)
 
     def can_install_project(self):
         """
@@ -733,7 +912,7 @@ class Environment(object):
         Run a given executable (eg. python, pip) in the environment.
         """
         env = kwargs.pop("env", os.environ).copy()
-        env.update(self._env_vars)
+        env.update(self._global_env_vars)
 
         # Insert bin dirs to PATH
         if "PATH" in env:
@@ -782,7 +961,8 @@ class Environment(object):
         content = {
             'tool_name': self.tool_name,
             'python': self._python,
-            'requirements': self._requirements
+            'requirements': self._requirements,
+            'build_env_vars': self.build_env_vars
         }
         util.write_json(path, content)
 
@@ -790,7 +970,7 @@ class Environment(object):
 class ExistingEnvironment(Environment):
     tool_name = "existing"
 
-    def __init__(self, conf, executable, requirements):
+    def __init__(self, conf, executable, requirements, tagged_env_vars):
         if executable == 'same':
             executable = sys.executable
 
@@ -809,8 +989,11 @@ class ExistingEnvironment(Environment):
         self._executable = executable
         self._requirements = {}
 
-        super(ExistingEnvironment, self).__init__(conf, executable, requirements)
-        self._env_vars.pop('ASV_ENV_DIR')
+        super(ExistingEnvironment, self).__init__(conf,
+                                                  executable,
+                                                  requirements,
+                                                  tagged_env_vars)
+        self._global_env_vars.pop('ASV_ENV_DIR')
 
     @property
     def installed_commit_hash(self):
@@ -832,7 +1015,8 @@ class ExistingEnvironment(Environment):
     def name(self):
         return get_env_name(self.tool_name,
                             self._executable.replace(os.path.sep, '_'),
-                            {})
+                            {},
+                            self._tagged_env_vars)
 
     def check_presence(self):
         return True

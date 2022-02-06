@@ -33,8 +33,10 @@
     "started_at": {
         "time_quantity.time_quantity_array_conversion": 1
     },
-    "ended_at": {
-        "time_quantity.time_quantity_array_conversion": 2
+    "duration": {
+        "time_quantity.time_quantity_array_conversion": 1,
+        "<build>": 2,
+        "<setup_cache example:21>": 3
     },
     "version": 1
 }

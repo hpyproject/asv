@@ -84,21 +84,6 @@ def test_parallelfailure():
         pass
 
 
-def test_write_unicode_to_ascii():
-    def get_fake_encoding():
-        return 'ascii'
-
-    original_getpreferredencoding = locale.getpreferredencoding
-    locale.getpreferredencoding = get_fake_encoding
-
-    try:
-        buff = io.BytesIO()
-        console.color_print("μs", file=buff)
-        assert buff.getvalue() == b'us\n'
-    finally:
-        locale.getpreferredencoding = original_getpreferredencoding
-
-
 def test_which_path(tmpdir):
     dirname = os.path.abspath(os.path.join(str(tmpdir), 'name with spaces'))
     fn = 'asv_test_exe_1234.exe'
@@ -223,6 +208,8 @@ def test_human_time():
         ("1.13s", 1.126),
         ("1.00m", 60),
         ("2.00h", 3600*2),
+        ("0s", 0),
+        ("n/a", float("nan")),
 
         # err
         ("1.00±1ns", 1e-9, 1e-9),
@@ -230,6 +217,10 @@ def test_human_time():
         ("1.00±0.01ns", 1e-9, 0.01e-9),
         ("1.00±0.01ns", 1e-9, 0.006e-9),
         ("1.00±0ns", 1e-9, 0.001e-9),
+        ("1.00±1000000ns", 1e-9, 1e-3),
+        ("0±1s", 0, 1),
+        ("0±1ms", 0, 1e-3),
+        ("0±0s", 0, 0),
     ]
 
     for item in items:
@@ -264,6 +255,29 @@ def test_human_file_size():
         assert got == expected, item
         got = util.human_value(item[1], 'bytes', *item[2:])
         assert got == expected, item
+
+
+def test_parse_human_time():
+    items = [
+        # (value, expected)
+        ("1", 60*60*24),
+        ("1h", 60*60),
+        ("1w", 60*60*24*7),
+    ]
+
+    for value, expected in items:
+        result = util.parse_human_time(value)
+        assert result == expected
+
+    bad_items = [
+        "1:",
+        ".",
+        "1x",
+    ]
+
+    for value in bad_items:
+        with pytest.raises(ValueError):
+            util.parse_human_time(value)
 
 
 def test_is_main_thread():
@@ -384,3 +398,9 @@ def test_check_output_exit_code(capsys):
         util.check_output([sys.executable, '-c', 'import sys; sys.exit(1)'])
     out, err = capsys.readouterr()
     assert '(exit status 1)' in out
+
+
+def test_geom_mean_na():
+    for x in [[1, 2, -3], [1, 2, 3], [3, 1, 3, None, None]]:
+        expected = abs(x[0]*x[1]*x[2])**(1/3)
+        assert abs(util.geom_mean_na(x) - expected) < 1e-10

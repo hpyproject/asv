@@ -9,7 +9,7 @@ import sys
 import six
 import pytest
 import json
-import shlex
+from collections import defaultdict
 
 from asv import config
 from asv import environment
@@ -80,8 +80,14 @@ def test_large_environment_matrix(tmpdir):
         env.create()
 
 
-def test_presence_checks(tmpdir):
+def test_presence_checks(tmpdir, monkeypatch):
     conf = config.Config()
+
+    if WIN:
+        # Tell conda to not use hardlinks: on Windows it's not possible
+        # to delete hard links to files in use, which causes problem when
+        # trying to cleanup environments during this test
+        monkeypatch.setenv(str('CONDA_ALWAYS_COPY'), str('True'))
 
     conf.env_dir = six.text_type(tmpdir.join("env"))
 
@@ -144,13 +150,17 @@ def test_matrix_expand_basic():
         'pkg5': []
     }
 
-    combinations = _sorted_dict_list(environment.iter_requirement_matrix(
+    combinations = _sorted_dict_list(environment.iter_matrix(
         conf.environment_type, conf.pythons, conf))
     expected = _sorted_dict_list([
-        {'python': '2.6', 'pkg2': '', 'pkg3': '', 'pkg4': '1.2', 'pkg5': ''},
-        {'python': '2.6', 'pkg2': '', 'pkg3': '', 'pkg4': '3.4', 'pkg5': ''},
-        {'python': '2.7', 'pkg2': '', 'pkg3': '', 'pkg4': '1.2', 'pkg5': ''},
-        {'python': '2.7', 'pkg2': '', 'pkg3': '', 'pkg4': '3.4', 'pkg5': ''},
+        {('python', None): '2.6', ('req', 'pkg2'): '', ('req', 'pkg3'): '',
+         ('req', 'pkg4'): '1.2', ('req', 'pkg5'): ''},
+        {('python', None): '2.6', ('req', 'pkg2'): '', ('req', 'pkg3'): '',
+         ('req', 'pkg4'): '3.4', ('req', 'pkg5'): ''},
+        {('python', None): '2.7', ('req', 'pkg2'): '', ('req', 'pkg3'): '',
+         ('req', 'pkg4'): '1.2', ('req', 'pkg5'): ''},
+        {('python', None): '2.7', ('req', 'pkg2'): '', ('req', 'pkg3'): '',
+         ('req', 'pkg4'): '3.4', ('req', 'pkg5'): ''},
     ])
     assert combinations == expected
 
@@ -168,13 +178,13 @@ def test_matrix_expand_include():
         {'environment_type': 'something', 'python': '2.7', 'b': '5'},
     ]
 
-    combinations = _sorted_dict_list(environment.iter_requirement_matrix(
+    combinations = _sorted_dict_list(environment.iter_matrix(
         conf.environment_type, conf.pythons, conf))
     expected = _sorted_dict_list([
-        {'python': '2.6', 'a': '1'},
-        {'python': '3.5', 'b': '2'},
-        {'python': '2.7', 'b': '3'},
-        {'python': '2.7', 'b': '5'}
+        {('python', None): '2.6', ('req', 'a'): '1'},
+        {('python', None): '3.5', ('req', 'b'): '2'},
+        {('python', None): '2.7', ('req', 'b'): '3'},
+        {('python', None): '2.7', ('req', 'b'): '5'}
     ])
     assert combinations == expected
 
@@ -182,7 +192,7 @@ def test_matrix_expand_include():
         {'b': '2'}
     ]
     with pytest.raises(util.UserError):
-        list(environment.iter_requirement_matrix(conf.environment_type, conf.pythons, conf))
+        list(environment.iter_matrix(conf.environment_type, conf.pythons, conf))
 
 
 def test_matrix_expand_include_detect_env_type():
@@ -195,10 +205,10 @@ def test_matrix_expand_include_detect_env_type():
         {'sys_platform': sys.platform, 'python': PYTHON_VER1},
     ]
 
-    combinations = _sorted_dict_list(environment.iter_requirement_matrix(
+    combinations = _sorted_dict_list(environment.iter_matrix(
         conf.environment_type, conf.pythons, conf))
     expected = _sorted_dict_list([
-        {'python': PYTHON_VER1},
+        {('python', None): PYTHON_VER1},
     ])
     assert combinations == expected
 
@@ -221,11 +231,11 @@ def test_matrix_expand_exclude():
         {'python': '2.7', 'b': None},
         {'python': '2.6', 'a': '1'},
     ]
-    combinations = _sorted_dict_list(environment.iter_requirement_matrix(
+    combinations = _sorted_dict_list(environment.iter_matrix(
         conf.environment_type, conf.pythons, conf))
     expected = _sorted_dict_list([
-        {'python': '2.7', 'a': '1', 'b': '1'},
-        {'python': '2.7', 'b': '2'}
+        {('python', None): '2.7', ('req', 'a'): '1', ('req', 'b'): '1'},
+        {('python', None): '2.7', ('req', 'b'): '2'}
     ])
     assert combinations == expected
 
@@ -233,12 +243,12 @@ def test_matrix_expand_exclude():
     conf.exclude = [
         {'python': '.*', 'b': None},
     ]
-    combinations = _sorted_dict_list(environment.iter_requirement_matrix(
+    combinations = _sorted_dict_list(environment.iter_matrix(
         conf.environment_type, conf.pythons, conf))
     expected = _sorted_dict_list([
-        {'python': '2.6', 'a': '1', 'b': '1'},
-        {'python': '2.7', 'a': '1', 'b': '1'},
-        {'python': '2.7', 'b': '2'}
+        {('python', None): '2.6', ('req', 'a'): '1', ('req', 'b'): '1'},
+        {('python', None): '2.7', ('req', 'a'): '1', ('req', 'b'): '1'},
+        {('python', None): '2.7', ('req', 'b'): '2'}
     ])
     assert combinations == expected
 
@@ -246,10 +256,10 @@ def test_matrix_expand_exclude():
     conf.exclude = [
         {'environment_type': 'some.*'},
     ]
-    combinations = _sorted_dict_list(environment.iter_requirement_matrix(
+    combinations = _sorted_dict_list(environment.iter_matrix(
         conf.environment_type, conf.pythons, conf))
     expected = [
-        {'python': '2.7', 'b': '2'}
+        {('python', None): '2.7', ('req', 'b'): '2'}
     ]
     assert combinations == expected
 
@@ -257,10 +267,10 @@ def test_matrix_expand_exclude():
     conf.exclude = [
         {'sys_platform': sys.platform},
     ]
-    combinations = _sorted_dict_list(environment.iter_requirement_matrix(
+    combinations = _sorted_dict_list(environment.iter_matrix(
         conf.environment_type, conf.pythons, conf))
     expected = [
-        {'python': '2.7', 'b': '2'}
+        {('python', None): '2.7', ('req', 'b'): '2'}
     ]
     assert combinations == expected
 
@@ -268,17 +278,49 @@ def test_matrix_expand_exclude():
     conf.exclude = [
         {'python': '(?!2.6).*'}
     ]
-    combinations = _sorted_dict_list(environment.iter_requirement_matrix(
+    combinations = _sorted_dict_list(environment.iter_matrix(
         conf.environment_type, conf.pythons, conf))
     expected = _sorted_dict_list([
-        {'python': '2.6', 'a': '1', 'b': '1'},
-        {'python': '2.6', 'a': '1'},
-        {'python': '2.7', 'b': '2'}
+        {('python', None): '2.6', ('req', 'a'): '1', ('req', 'b'): '1'},
+        {('python', None): '2.6', ('req', 'a'): '1'},
+        {('python', None): '2.7', ('req', 'b'): '2'}
     ])
     assert combinations == expected
 
 
-@pytest.mark.skipif((not HAS_CONDA), reason="Requires conda")
+def test_iter_env_matrix_combinations():
+    conf = config.Config()
+    conf.environment_type = 'something'
+    conf.pythons = ["2.6"]
+    conf.matrix = {}
+    conf.include = []
+
+    # (matrix, expected)
+    env_matrices = [
+        ({'var0': ['val0', 'val1'], 'var1': ['val2', 'val3']},
+         [{'var0': 'val0', 'var1': 'val2'},
+          {'var0': 'val0', 'var1': 'val3'},
+          {'var0': 'val1', 'var1': 'val2'},
+          {'var0': 'val1', 'var1': 'val3'}]),
+        ({'var0': ['val0', 'val1'], 'var1': ['val2', None]},
+         [{'var0': 'val0', 'var1': 'val2'}, {'var0': 'val0'},
+          {'var0': 'val1', 'var1': 'val2'}, {'var0': 'val1'}]),
+        ({'var0': ['val0', 'val1']},
+         [{'var0': 'val0'}, {'var0': 'val1'}]),
+        ({}, [{}]),
+    ]
+
+    for matrix, expected in env_matrices:
+        conf.matrix = {'env': matrix}
+        expected = [{('env', key): value for key, value in item.items()}
+                    for item in expected]
+        for m in expected:
+            m['python', None] = "2.6"
+        result = _sorted_dict_list(environment.iter_matrix(conf.environment_type, conf.pythons, conf))
+        assert result == _sorted_dict_list(expected)
+
+
+@pytest.mark.skipif((not HAS_CONDA), reason="Requires conda and conda-build")
 def test_conda_pip_install(tmpdir, dummy_packages):
     # test that we can install with pip into a conda environment.
     conf = config.Config()
@@ -300,6 +342,57 @@ def test_conda_pip_install(tmpdir, dummy_packages):
         output = env.run(
             ['-c', 'import asv_dummy_test_package_2 as p, sys; sys.stdout.write(p.__version__)'])
         assert output.startswith(six.text_type(env._requirements['pip+asv_dummy_test_package_2']))
+
+
+@pytest.mark.skipif((not HAS_CONDA), reason="Requires conda and conda-build")
+def test_conda_environment_file(tmpdir, dummy_packages):
+    env_file_name = six.text_type(tmpdir.join("environment.yml"))
+    with open(env_file_name, "w") as temp_environment_file:
+        temp_environment_file.write(
+                'name: test_conda_envs\ndependencies:\n  - asv_dummy_test_package_2')
+
+    conf = config.Config()
+    conf.env_dir = six.text_type(tmpdir.join("env"))
+    conf.environment_type = "conda"
+    conf.pythons = [PYTHON_VER1]
+    conf.conda_environment_file = env_file_name
+    conf.matrix = {
+        "asv_dummy_test_package_1": [DUMMY1_VERSION]
+    }
+
+    environments = list(environment.get_environments(conf, None))
+
+    assert len(environments) == 1 * 1 * 1
+
+    for env in environments:
+        env.create()
+
+        output = env.run(
+            ['-c', 'import asv_dummy_test_package_1 as p, sys; sys.stdout.write(p.__version__)'])
+        assert output.startswith(six.text_type(DUMMY1_VERSION))
+
+        output = env.run(
+            ['-c', 'import asv_dummy_test_package_2 as p, sys; sys.stdout.write(p.__version__)'])
+        assert output.startswith(six.text_type(DUMMY2_VERSIONS[1]))
+
+
+@pytest.mark.skipif((not HAS_CONDA), reason="Requires conda and conda-build")
+def test_conda_run_executable(tmpdir):
+    # test that we can install with pip into a conda environment.
+    conf = config.Config()
+
+    conf.env_dir = six.text_type(tmpdir.join("env"))
+
+    conf.environment_type = "conda"
+    conf.pythons = [PYTHON_VER1]
+    conf.matrix = {}
+    environments = list(environment.get_environments(conf, None))
+
+    assert len(environments) == 1 * 1 * 1
+
+    for env in environments:
+        env.create()
+        env.run_executable('conda', ['info'])
 
 
 def test_environment_select():
@@ -424,10 +517,11 @@ def test_matrix_existing():
     items = [(env.tool_name, tuple(env.requirements.keys())) for env in environments]
     assert items == [('existing', ())]
 
+
 # environment.yml should respect the specified order
 # of channels when adding packages
 @pytest.mark.skipif((not HAS_CONDA),
-                    reason="Requires conda")
+                    reason="Requires conda and conda-build")
 @pytest.mark.parametrize("channel_list,expected_channel", [
     (["defaults", "conda-forge"], "pkgs/main"),
     (["conda-forge", "defaults"], "conda-forge"),
@@ -511,7 +605,7 @@ def test_environment_name_sanitization():
 
 
 @pytest.mark.parametrize("environment_type", [
-    pytest.param("conda", marks=pytest.mark.skipif(not HAS_CONDA, reason="needs conda")),
+    pytest.param("conda", marks=pytest.mark.skipif(not HAS_CONDA, reason="needs conda and conda-build")),
     pytest.param("virtualenv", marks=pytest.mark.skipif(not HAS_VIRTUALENV, reason="needs virtualenv"))
 ])
 def test_environment_environ_path(environment_type, tmpdir, monkeypatch):
@@ -686,14 +780,14 @@ def test_installed_commit_hash(tmpdir):
 
     # Check updating installed_commit_hash
     assert env.installed_commit_hash == None
-    assert env._env_vars.get('ASV_COMMIT') == None
+    assert env._global_env_vars.get('ASV_COMMIT') == None
     env.install_project(conf, repo, commit_hash)
     assert env.installed_commit_hash == commit_hash
-    assert env._env_vars.get('ASV_COMMIT') == commit_hash
+    assert env._global_env_vars.get('ASV_COMMIT') == commit_hash
 
     env = get_env()
     assert env.installed_commit_hash == commit_hash
-    assert env._env_vars.get('ASV_COMMIT') == commit_hash
+    assert env._global_env_vars.get('ASV_COMMIT') == commit_hash
 
     # Configuration change results to reinstall
     env._project = "something"
@@ -703,11 +797,11 @@ def test_installed_commit_hash(tmpdir):
     env = get_env()
     env._uninstall_project()
     assert env.installed_commit_hash == None
-    assert env._env_vars.get('ASV_COMMIT') != None
+    assert env._global_env_vars.get('ASV_COMMIT') != None
 
     env = get_env()
     assert env.installed_commit_hash == None
-    assert env._env_vars.get('ASV_COMMIT') == None
+    assert env._global_env_vars.get('ASV_COMMIT') == None
 
 
 def test_install_success(tmpdir):
@@ -733,3 +827,116 @@ def test_install_success(tmpdir):
     env.install_project(conf, repo, commit_hash)
 
     env.run(['-c', 'import asv_test_repo as t, sys; sys.exit(0 if t.dummy_value == 0 else 1)'])
+
+
+def test_install_env_matrix_values(tmpdir):
+    tmpdir = six.text_type(tmpdir)
+
+    dvcs = generate_test_repo(tmpdir, [0], dvcs_type='git')
+    commit_hash = dvcs.get_branch_hashes()[0]
+
+    conf = config.Config()
+    conf.env_dir = os.path.join(tmpdir, "env")
+    conf.pythons = [PYTHON_VER1]
+    conf.repo = os.path.abspath(dvcs.path)
+    conf.matrix = {'env': {'SOME_ASV_TEST_BUILD_VALUE': '1'},
+                   'env_nobuild': {'SOME_ASV_TEST_NON_BUILD_VALUE': '1'}}
+
+    repo = get_repo(conf)
+
+    env = list(environment.get_environments(conf, None))[0]
+    env.create()
+    env.install_project(conf, repo, commit_hash)
+
+    env.run(['-c',
+             'import asv_test_repo.build_time_env as t, sys; '
+             'sys.exit(0 if t.env["SOME_ASV_TEST_BUILD_VALUE"] == "1" else 1)'])
+
+    env.run(['-c',
+             'import asv_test_repo.build_time_env as t, sys; '
+             'sys.exit(0 if "SOME_ASV_TEST_NON_BUILD_VALUE" not in t.env else 1)'])
+
+
+def test_environment_env_matrix():
+    # (build_vars, non_build_vars, environ_count, build_count)
+    configs = [
+        ({}, {}, 1, 1),
+        ({"var1": ["val1"]}, {}, 1, 1),
+        ({"var1": ["val1", "val2", "val3"]}, {}, 3, 3),
+        ({"var1": ["val1", "val2"], "var2": ['val3', 'val4']}, {}, 4, 4),
+        ({"var1": ["val1", "val2"], "var2": ['val3', None]}, {}, 4, 4),
+        ({"var1": ["val1", "val2"]}, {"var2": ['val3', None]}, 4, 2),
+        ({"var1": ["val1", "val2"], "var2": ['val3', 'val4']},
+         {"var3": ['val5', None]}, 8, 4),
+    ]
+
+    for build_vars, non_build_vars, environ_count, build_count in configs:
+        conf = config.Config()
+
+        conf.matrix = {
+            "env": build_vars,
+            "env_nobuild": non_build_vars,
+        }
+        environments = list(environment.get_environments(conf, None))
+
+        assert len(environments) == environ_count
+        assert len(set(e.dir_name for e in environments)) == build_count
+
+
+def test__parse_matrix():
+    cases = [
+        ({"env": {"A": "B"}, "env_nobuild": {"C": None}, "req": {"foo": ["9"]}},
+         {("env", "A"): "B", ("env_nobuild", "C"): None, ("req", "foo"): ["9"]})
+    ]
+    for rule, expected in cases:
+        parsed = environment._parse_matrix(rule)
+        assert parsed == expected
+
+
+def test__parse_matrix_invalid():
+    cases = [
+        {"env": "1", "req": "1", "foo": "1"},
+    ]
+    for m in cases:
+        with pytest.raises(util.UserError):
+            environment._parse_matrix(m)
+
+
+def test__parse_matrix_legacy():
+    cases = [
+        ({"foo": "1", "bar": ["2", "3"]},
+         {("req", "foo"): "1", ("req", "bar"): ["2", "3"]})
+    ]
+    for m, expected in cases:
+        parsed = environment._parse_matrix(m)
+        assert parsed == expected
+
+
+def test__parse_exclude_include_rule():
+    cases = [
+        ({"python": "2.6", "environment_type": "conda", "sys_platform": "123",
+          "env": {"A": "B"}, "env_nobuild": {"C": "D"}, "req": {"foo": "9"}},
+         {("python", None): "2.6", ("environment_type", None): "conda", ("sys_platform", None): "123",
+          ("env", "A"): "B", ("env_nobuild", "C"): "D", ("req", "foo"): "9"})
+    ]
+    for rule, expected in cases:
+        parsed = environment._parse_exclude_include_rule(rule)
+        assert parsed == expected
+
+
+def test__parse_exclude_include_rule_invalid():
+    cases = [
+        {"python": "2.6", "environment_type": "conda", "sys_platform": "123",
+         "env": {"A": "B"}, "env_nobuild": {"C": "D"}, "req": {"foo": "9"}, "foo": "9"},
+    ]
+    for rule in cases:
+        with pytest.raises(util.UserError):
+            environment._parse_exclude_include_rule(rule)
+
+
+def test__parse_matrix_entries():
+    entries =  {("python", None): "2.6",  ("env", "A"): "B", ("env_nobuild", "C"): "D", ("req", "foo"): "9"}
+    python, requirements, tagged_env_vars = environment._parse_matrix_entries(entries)
+    assert python == "2.6"
+    assert requirements == {"foo": "9"}
+    assert tagged_env_vars == {("build", "A"): "B", ("nobuild", "C"): "D"}

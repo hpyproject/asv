@@ -26,6 +26,7 @@ import stat
 import shlex
 import operator
 import collections
+import multiprocessing
 
 import six
 from six.moves import xrange
@@ -195,6 +196,21 @@ def human_file_size(size, err=None):
         str_err = human_float(err / scale, 1, truncate_small=2)
         return "{0:s}±{1:s}{2}".format(str_value, str_err, suffix)
 
+
+_human_time_units = (
+    ('ns', 0.000000001),
+    ('μs', 0.000001),
+    ('ms', 0.001),
+    ('s', 1),
+    ('m', 60),
+    ('h', 60 * 60),
+    ('d', 60 * 60 * 24),
+    ('w', 60 * 60 * 24 * 7),
+    ('y', 60 * 60 * 24 * 7 * 52),
+    ('C', 60 * 60 * 24 * 7 * 52 * 100)
+)
+
+
 def human_time(seconds, err=None):
     """
     Returns a human-friendly time string that is always exactly 6
@@ -221,23 +237,24 @@ def human_time(seconds, err=None):
         A human-friendly representation of the given number of seconds
         that is always exactly 6 characters.
     """
-    units = [
-        ('ns', 0.000000001),
-        ('μs', 0.000001),
-        ('ms', 0.001),
-        ('s', 1),
-        ('m', 60),
-        ('h', 60 * 60),
-        ('d', 60 * 60 * 24),
-        ('w', 60 * 60 * 24 * 7),
-        ('y', 60 * 60 * 24 * 7 * 52),
-        ('C', 60 * 60 * 24 * 7 * 52 * 100)
-    ]
-
+    units = _human_time_units
     seconds = float(seconds)
 
+    scale = seconds
+
+    if scale == 0 and err is not None:
+        scale = float(err)
+
+    if scale == 0:
+        # Represent zero in reasonable units
+        units = [('s', 1), ('m', 60)]
+
+    if scale != scale:
+        # nan
+        return "n/a"
+
     for i in xrange(len(units) - 1):
-        if seconds < units[i+1][1]:
+        if scale < units[i+1][1]:
             str_time = human_float(seconds / units[i][1], 3, significant_zeros=True)
             if err is None:
                 return "{0:s}{1}".format(str_time, units[i][0])
@@ -280,6 +297,28 @@ def human_value(value, unit, err=None):
         display = json.dumps(value)
 
     return display
+
+
+def parse_human_time(string, base_period='d'):
+    """
+    Parse a human-specified time period to an integer number of seconds.
+    The following format is accepted: <number><suffix>
+
+    Raises a ValueError on parse error.
+    """
+    units = dict(_human_time_units)
+    units[''] = units[base_period]
+
+    suffixes = '|'.join(units.keys())
+
+    try:
+        m = re.match(r'^\s*([0-9.]+)\s*({})\s*$'.format(suffixes), string)
+        if m is None:
+            raise ValueError()
+        return float(m.group(1)) * units[m.group(2)]
+    except ValueError:
+        raise ValueError("%r is not a valid time period (valid units: %s)"
+                         % (string, suffixes))
 
 
 def which(filename, paths=None):
@@ -375,8 +414,13 @@ class DebugLogBuffer(object):
         self.first = True
         self.linebreak_re = re.compile(b'.*\n')
         self.log = log
+        self.lock = threading.Lock()
 
     def __call__(self, c):
+        with self.lock:
+            self._process(c)
+
+    def _process(self, c):
         if c is None:
             text = b"".join(self.buf)
             del self.buf[:]
@@ -520,64 +564,87 @@ def check_output(args, valid_return_codes=(0,), timeout=600, dots=True,
 
     if log.is_debug_enabled():
         debug_log = DebugLogBuffer(log)
+        dots = False
     else:
         debug_log = lambda c: None
 
     if WIN:
         start_time = [time.time()]
-        was_timeout = [False]
+        dot_start_time = start_time[0]
+        is_timeout = False
 
-        def stdout_reader_run():
-            while True:
-                c = proc.stdout.read(1)
-                if not c:
-                    break
-                start_time[0] = time.time()
-                stdout_chunks.append(c)
-                debug_log(c)
+        def stream_reader(stream, buf):
+            try:
+                while not is_timeout:
+                    c = stream.read(1)
+                    if not c:
+                        break
+                    start_time[0] = time.time()
+                    buf.append(c)
+                    debug_log(c)
+            finally:
+                stream.close()
 
-        def stderr_reader_run():
-            while True:
-                c = proc.stderr.read(1)
-                if not c:
-                    break
-                start_time[0] = time.time()
-                stderr_chunks.append(c)
-                debug_log(c)
-
-        def watcher_run():
-            while proc.returncode is None:
-                time.sleep(0.1)
-                if timeout is not None and time.time() - start_time[0] > timeout:
-                    was_timeout[0] = True
-                    proc.send_signal(signal.CTRL_BREAK_EVENT)
-
-        watcher = threading.Thread(target=watcher_run)
-        watcher.start()
-
-        stdout_reader = threading.Thread(target=stdout_reader_run)
+        stdout_reader = threading.Thread(target=stream_reader, args=(proc.stdout, stdout_chunks))
+        stdout_reader.daemon = True
         stdout_reader.start()
 
+        all_threads = [stdout_reader]
+
         if not redirect_stderr:
-            stderr_reader = threading.Thread(target=stderr_reader_run)
+            stderr_reader = threading.Thread(target=stream_reader, args=(proc.stderr, stderr_chunks))
+            stderr_reader.daemon = True
             stderr_reader.start()
+            all_threads.append(stderr_reader)
 
-        try:
-            proc.wait()
-        finally:
-            if proc.returncode is None:
-                proc.terminate()
-                proc.wait()
-            watcher.join()
-            if not redirect_stderr:
-                stderr_reader.join()
-            stdout_reader.join()
+        # Wait for reader threads
+        threads = list(all_threads)
+        while threads:
+            thread = threads[0]
 
-            proc.stdout.close()
-            if not redirect_stderr:
-                proc.stderr.close()
+            if timeout is None:
+                remaining = None
+            else:
+                remaining = timeout - (time.time() - start_time[0])
+                if remaining <= 0:
+                    # Timeout; we won't wait for the thread to join here
+                    if not is_timeout:
+                        is_timeout = True
+                        proc.send_signal(signal.CTRL_BREAK_EVENT)
+                    threads.pop(0)
+                    continue
 
-        is_timeout = was_timeout[0]
+            if dots:
+                dot_remaining = 0.5 - (time.time() - last_dot_time)
+                if dot_remaining <= 0:
+                    # Print a dot only if there has been output
+                    if dot_start_time != start_time[0]:
+                        if dots is True:
+                            log.dot()
+                        elif dots:
+                            dots()
+                        dot_start_time = start_time[0]
+                        last_dot_time = time.time()
+                    dot_remaining = 0.5
+
+                if remaining is None:
+                    remaining = dot_remaining
+                else:
+                    remaining = min(dot_remaining, remaining)
+
+            thread.join(remaining)
+            if not thread.is_alive():
+                threads.pop(0)
+
+        if is_timeout:
+            proc.terminate()
+
+            # Wait a bit for the reader threads, if they're alive
+            for thread in all_threads:
+                thread.join(0.1)
+
+        # Wait for process to exit
+        proc.wait()
     else:
         try:
             if posix and is_main_thread():
@@ -661,7 +728,9 @@ def check_output(args, valid_return_codes=(0,), timeout=600, dots=True,
         if not redirect_stderr:
             proc.stderr.close()
 
+    # Flush and disconnect debug log, if any
     debug_log(None)
+    debug_log = lambda c: None
 
     stdout = b''.join(stdout_chunks)
     stderr = b''.join(stderr_chunks)
@@ -811,7 +880,7 @@ def load_json(path, api_version=None, js_comments=False):
     return d
 
 
-def update_json(cls, path, api_version):
+def update_json(cls, path, api_version, compact=False):
     """
     Perform JSON file format updates.
 
@@ -838,7 +907,7 @@ def update_json(cls, path, api_version):
     if d['version'] < api_version:
         for x in six.moves.xrange(d['version'] + 1, api_version + 1):
             d = getattr(cls, 'update_to_{0}'.format(x), lambda x: x)(d)
-        write_json(path, d, api_version)
+        write_json(path, d, api_version, compact=compact)
     elif d['version'] > api_version:
         raise UserError(
             "{0} is stored in a format that is newer than "
@@ -926,6 +995,13 @@ def get_cpu_info():
     elif sys.platform.startswith('darwin'):
         sysctl = which('sysctl')
         return check_output([sysctl, '-n', 'machdep.cpu.brand_string']).strip()
+    elif sys.platform.startswith('win'):
+        try:
+            from win32com.client import GetObject
+            cimv = GetObject(r"winmgmts:root\cimv2")
+            return cimv.ExecQuery("Select Name from Win32_Processor")[0].name
+        except:
+            pass
     return ''
 
 
@@ -1313,6 +1389,45 @@ def interpolate_command(command, variables):
         break
 
     return result, env, return_codes, cwd
+
+
+def truncate_float_list(item, digits=5):
+    """
+    Truncate floating-point numbers (in a possibly nested list)
+    to given significant digits, for a shorter base-10
+    representation.
+    """
+    if isinstance(item, float):
+        fmt = '{{:.{}e}}'.format(digits - 1)
+        return float(fmt.format(item))
+    elif isinstance(item, list):
+        return [truncate_float_list(x, digits) for x in item]
+    else:
+        return item
+
+
+_global_locks = {}
+
+
+def _init_global_locks(lock_dict):
+    """Initialize global locks in a new multiprocessing process"""
+    _global_locks.update(lock_dict)
+
+
+def new_multiprocessing_lock(name):
+    """Create a new global multiprocessing lock"""
+    _global_locks[name] = multiprocessing.Lock()
+
+
+def get_multiprocessing_lock(name):
+    """Get an existing global multiprocessing lock"""
+    return _global_locks[name]
+
+
+def get_multiprocessing_pool(parallel=None):
+    """Create a multiprocessing.Pool, managing global locks properly"""
+    return multiprocessing.Pool(initializer=_init_global_locks,
+                                initargs=(_global_locks,))
 
 
 try:

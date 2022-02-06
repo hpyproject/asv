@@ -7,6 +7,7 @@ import multiprocessing
 import argparse
 
 from .. import __version__
+from .. import util
 
 
 def add_global_arguments(parser, suppress_defaults=True):
@@ -42,6 +43,11 @@ def add_compare(parser, only_changed_default=False, sort_default='name'):
         problematic.  For example, with a factor of 1.1 (the default
         value), if a benchmark gets 10%% slower or faster, it will
         be displayed in the results list.""")
+
+    parser.add_argument(
+        '--no-stats', action="store_false", dest="use_stats", default=True,
+        help="""Do not use result statistics in comparisons, only `factor`
+        and the median result.""")
 
     parser.add_argument(
         '--split', '-s', action='store_true',
@@ -94,7 +100,11 @@ class DictionaryArgAction(argparse.Action):
             raise argparse.ArgumentError(self,
                                          "{!r} cannot be set".format(key))
 
+        dest_key = key
         conv = self.converters.get(key, None)
+        if isinstance(conv, tuple):
+            dest_key, conv = conv
+
         if conv is not None:
             try:
                 value = conv(value)
@@ -106,7 +116,7 @@ class DictionaryArgAction(argparse.Action):
         result = getattr(namespace, self.dest, None)
         if result is None:
             result = {}
-        result[key] = value
+        result[dest_key] = value
         setattr(namespace, self.dest, result)
 
 
@@ -155,7 +165,8 @@ def add_bench(parser):
         'warmup_time': float,
         'repeat': parse_repeat,
         'number': int,
-        'processes': int,
+        'rounds': int,
+        'processes': ('rounds', int),  # backward compatibility
         'sample_time': float,
         'cpu_affinity': parse_affinity
     }
@@ -250,10 +261,18 @@ def add_parallel(parser):
         number of cores on this machine.""")
 
 
-def add_record_samples(parser):
-    parser.add_argument(
-        "--record-samples", action="store_true",
-        help="""Store raw measurement samples, not only statistics""")
+def add_record_samples(parser, record_default=False):
+    grp = parser.add_mutually_exclusive_group()
+    grp.add_argument(
+        "--record-samples", action="store_true", dest="record_samples",
+        help=(argparse.SUPPRESS if record_default else
+              """Store raw measurement samples, not only statistics"""),
+        default=record_default)
+    grp.add_argument(
+        "--no-record-samples", action="store_false", dest="record_samples",
+        help=(argparse.SUPPRESS if not record_default else
+              """Do not store raw measurement samples, but only statistics"""),
+        default=record_default)
     parser.add_argument(
         "--append-samples", action="store_true",
         help="""Combine new measurement samples with previous results,
@@ -262,10 +281,38 @@ def add_record_samples(parser):
 
 
 def positive_int(string):
+    """
+    Parse a positive integer argument
+    """
     try:
         value = int(string)
         if not value > 0:
-            raise argparse.ArgumentTypeError("%r is not a positive integer" % (string,))
+            raise ValueError()
         return value
     except ValueError:
-        raise argparse.ArgumentTypeError("%r is not an integer" % (string,))
+        raise argparse.ArgumentTypeError("%r is not a positive integer" % (string,))
+
+
+def positive_int_or_inf(string):
+    """
+    Parse a positive integer argument
+    """
+    try:
+        if string == 'all':
+            return float("inf")
+        value = int(string)
+        if not value > 0:
+            raise ValueError()
+        return value
+    except ValueError:
+        raise argparse.ArgumentTypeError("%r is not a positive integer or 'all'" % (string,))
+
+
+def time_period(string, base_period='d'):
+    """
+    Parse a time period argument with unit suffix
+    """
+    try:
+        return util.parse_human_time(string, base_period)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(str(err))

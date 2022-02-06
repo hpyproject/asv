@@ -4,7 +4,9 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+import os
 import sys
+
 if sys.version_info[0] == 3:
     xrange = range
 
@@ -46,3 +48,22 @@ def track_value():
 
 def test_shared_code():
     assert shared_function() == 42
+
+
+def track_environment_value():
+    v = os.environ.get('SOME_TEST_VAR', '0')
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return 0
+
+
+def track_fail_errcode_123():
+    if hasattr(os, '_exit'):
+        os._exit(123)
+    else:
+        sys.exit(123)
+
+
+def track_fail_signal_9():
+    os.kill(os.getpid(), 9)

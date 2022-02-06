@@ -292,6 +292,10 @@ Or, to benchmark all of the commits since a particular tag (``v0.1``)::
 
     asv run v0.1..master
 
+To benchmark a single commit, or tag, use `^!` (git)::
+
+    asv run v0.1^!
+
 Corresponding examples for Mercurial using the revsets specification are also
 possible.
 
@@ -566,7 +570,7 @@ simple table summary of profiling results is displayed::
 Navigating these sorts of results can be tricky, and generally you
 want to open the results in a GUI tool, such as `RunSnakeRun
 <http://www.vrplumber.com/programming/runsnakerun/>`__ or `snakeviz
-<http://jiffyclub.github.com/snakeviz/>`__.  For example, by passing
+<http://jiffyclub.github.io/snakeviz/>`__.  For example, by passing
 the ``--gui=runsnake`` to ``asv profile``, the profile is collected
 (or extracted) and opened in the RunSnakeRun tool.
 

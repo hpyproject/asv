@@ -22,24 +22,16 @@ from asv.results import iter_results_for_machine
 from asv.util import check_output, which
 
 from . import tools
-from .tools import dummy_packages, HAS_CONDA
+from .tools import dummy_packages, get_default_environment_type
 
 
-dummy_values = [
-    (None, None),
-    (1, 1),
-    (3, 1),
-    (None, 1),
-    (6, None),
-    (5, 1),
-    (6, 1),
+dummy_values = (
     (6, 1),
     (6, 6),
     (6, 6),
-]
+)
 
-
-def generate_basic_conf(tmpdir, repo_subdir=''):
+def generate_basic_conf(tmpdir, repo_subdir='', values=dummy_values, dummy_packages=True):
     tmpdir = six.text_type(tmpdir)
     local = abspath(dirname(__file__))
     os.chdir(tmpdir)
@@ -54,8 +46,16 @@ def generate_basic_conf(tmpdir, repo_subdir=''):
     shutil.copyfile(join(local, 'asv-machine.json'),
                     machine_file)
 
-    repo_path = tools.generate_test_repo(tmpdir, dummy_values,
+    repo_path = tools.generate_test_repo(tmpdir, values,
                                          subdir=repo_subdir).path
+
+    if dummy_packages:
+        matrix = {
+            "asv_dummy_test_package_1": [""],
+            "asv_dummy_test_package_2": tools.DUMMY2_VERSIONS,
+        }
+    else:
+        matrix = {}
 
     conf_dict = {
         'env_dir': 'env',
@@ -65,10 +65,7 @@ def generate_basic_conf(tmpdir, repo_subdir=''):
         'repo': relpath(repo_path),
         'dvcs': 'git',
         'project': 'asv',
-        'matrix': {
-            "asv_dummy_test_package_1": [""],
-            "asv_dummy_test_package_2": tools.DUMMY2_VERSIONS,
-        },
+        'matrix': matrix,
     }
     if repo_subdir:
         conf_dict['repo_subdir'] = repo_subdir
@@ -88,17 +85,26 @@ def basic_conf(tmpdir, dummy_packages):
 
 def test_run_publish(capfd, basic_conf):
     tmpdir, local, conf, machine_file = basic_conf
+    tmpdir = util.long_path(tmpdir)
+
+    conf.matrix = {
+        "req": dict(conf.matrix),
+        "env":{"SOME_TEST_VAR": ["1"]},
+    }
 
     # Tests a typical complete run/publish workflow
-    tools.run_asv_with_conf(conf, 'run', "master~5..master", '--steps=2',
-                            '--quick', '--show-stderr', '--profile',
-                            '-a', 'warmup_time=0',
-                            _machine_file=machine_file)
+    ret = tools.run_asv_with_conf(conf, 'run', "master", '--steps=2',
+                                  '--quick', '--show-stderr', '--profile',
+                                  '-a', 'warmup_time=0',
+                                  '--durations=5',
+                                  _machine_file=machine_file)
+    assert ret is None
     text, err = capfd.readouterr()
 
     assert len(os.listdir(join(tmpdir, 'results_workflow', 'orangutan'))) == 5
     assert len(os.listdir(join(tmpdir, 'results_workflow'))) == 2
     assert 'asv: benchmark timed out (timeout 0.1s)' in text
+    assert 'total duration' in text
 
     tools.run_asv_with_conf(conf, 'publish')
 
@@ -112,7 +118,9 @@ def test_run_publish(capfd, basic_conf):
                               'asv_dummy_test_package_1',
                               'asv_dummy_test_package_2-' + tools.DUMMY2_VERSIONS[1],
                               'branch-master',
-                              'cpu-Blazingly fast', 'machine-orangutan',
+                              'cpu-Blazingly fast',
+                              'env-SOME_TEST_VAR-1',
+                              'machine-orangutan',
                               'os-GNU_Linux', 'python-*', 'ram-128GB',
                               'params_examples.time_skip.json'))[0]
     with open(filename, 'r') as fp:
@@ -127,12 +135,12 @@ def test_run_publish(capfd, basic_conf):
 
     # Check that the skip options work
     capfd.readouterr()
-    tools.run_asv_with_conf(conf, 'run', "master~5..master", '--steps=2',
+    tools.run_asv_with_conf(conf, 'run', "master", '--steps=2',
                             '--quick', '--skip-existing-successful',
                             '--bench=time_secondary.track_value',
                             '--skip-existing-failed',
                             _machine_file=join(tmpdir, 'asv-machine.json'))
-    tools.run_asv_with_conf(conf, 'run', "master~5..master", '--steps=2',
+    tools.run_asv_with_conf(conf, 'run', "master", '--steps=2',
                             '--bench=time_secondary.track_value',
                             '--quick', '--skip-existing-commits',
                             _machine_file=join(tmpdir, 'asv-machine.json'))
@@ -140,10 +148,9 @@ def test_run_publish(capfd, basic_conf):
     assert 'Running benchmarks.' not in text
 
     # Check EXISTING and --environment work
-    if HAS_CONDA:
-        env_spec = ("-E", "conda:{0[0]}.{0[1]}".format(sys.version_info))
-    else:
-        env_spec = ("-E", "virtualenv:{0[0]}.{0[1]}".format(sys.version_info))
+    python = "{0[0]}.{0[1]}".format(sys.version_info)
+    env_type = get_default_environment_type(conf, python)
+    env_spec = ("-E", env_type + ":" + python)
     tools.run_asv_with_conf(conf, 'run', "EXISTING", '--quick',
                             '--bench=time_secondary.track_value',
                             *env_spec,

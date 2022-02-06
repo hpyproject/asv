@@ -57,6 +57,7 @@ import json
 import os
 import pickle
 import re
+import subprocess
 import textwrap
 import timeit
 import time
@@ -66,6 +67,8 @@ import pkgutil
 import traceback
 import contextlib
 from importlib import import_module
+from collections import Counter
+import warnings
 
 
 # The best timer we can use is time.process_time, but it is not
@@ -296,8 +299,13 @@ def _get_first_attr(sources, name, default, ignore_case=False):
 def get_setup_cache_key(func):
     if func is None:
         return None
-    return '{0}:{1}'.format(inspect.getsourcefile(func),
-                            inspect.getsourcelines(func)[1])
+
+    module = inspect.getmodule(func)
+    mname = ".".join(module.__name__.split('.', 1)[1:])
+    if not mname:
+        mname = inspect.getsourcefile(func)
+
+    return '{0}:{1}'.format(mname, inspect.getsourcelines(func)[1])
 
 
 def get_source_code(items):
@@ -402,6 +410,23 @@ def check_num_args(root, benchmark_name, func, min_num_args, max_num_args=None):
     return ok
 
 
+def _repr_no_address(obj):
+    result = repr(obj)
+    address_regex = re.compile(r'^(<.*) at (0x[\da-fA-F]*)(>)$')
+    match = address_regex.match(result)
+    if match:
+        suspected_address = match.group(2)
+        # Double check this is the actual address
+        default_result = object.__repr__(obj)
+        match2 = address_regex.match(default_result)
+        if match2:
+            known_address = match2.group(2)
+            if known_address == suspected_address:
+                result = match.group(1) + match.group(3)
+
+    return result
+
+
 class Benchmark(object):
     """
     Represents a single benchmark.
@@ -461,7 +486,17 @@ class Benchmark(object):
                                                                    len(self._params))]
 
         # Exported parameter representations
-        self.params = [[repr(item) for item in entry] for entry in self._params]
+        self.params = [[_repr_no_address(item) for item in entry] for entry in self._params]
+        for i, param in enumerate(self.params):
+            if len(param) != len(set(param)):
+                counter = Counter(param)
+                dupe_dict = {name: 0 for name, count in counter.items() if count > 1}
+                for j in range(len(param)):
+                    name = param[j]
+                    if name in dupe_dict:
+                        param[j] = name + ' ({})'.format(dupe_dict[name])
+                        dupe_dict[name] += 1
+                self.params[i] = param
 
     def set_param_idx(self, param_idx):
         try:
@@ -513,8 +548,9 @@ class Benchmark(object):
         try:
             for setup in self._setups:
                 setup(*self._current_params)
-        except NotImplementedError:
+        except NotImplementedError as e:
             # allow skipping test
+            print("asv: skipped: {!r} ".format(e))
             return True
         return False
 
@@ -568,7 +604,8 @@ class TimeBenchmark(Benchmark):
         self.type = "time"
         self.unit = "seconds"
         self._attr_sources = attr_sources
-        self.processes = int(_get_first_attr(self._attr_sources, 'processes', 2))
+        old = int(_get_first_attr(self._attr_sources, 'processes', 2))  # backward compat.
+        self.rounds = int(_get_first_attr(self._attr_sources, 'rounds', old))
         self._load_vars()
 
     def _load_vars(self):
@@ -585,16 +622,7 @@ class TimeBenchmark(Benchmark):
         self._load_vars()
         return result
 
-    def run(self, *param):
-        warmup_time = self.warmup_time
-        if warmup_time < 0:
-            if '__pypy__' in sys.modules:
-                warmup_time = 1.0
-            else:
-                # Transient effects exist also on CPython, e.g. from
-                # OS scheduling
-                warmup_time = 0.1
-
+    def _get_timer(self, *param):
         if param:
             func = lambda: self.func(*param)
         else:
@@ -605,6 +633,20 @@ class TimeBenchmark(Benchmark):
             setup=self.redo_setup,
             timer=self.timer)
 
+        return timer
+
+    def run(self, *param):
+        warmup_time = self.warmup_time
+        if warmup_time < 0:
+            if '__pypy__' in sys.modules:
+                warmup_time = 1.0
+            else:
+                # Transient effects exist also on CPython, e.g. from
+                # OS scheduling
+                warmup_time = 0.1
+
+        timer = self._get_timer(*param)
+
         try:
             min_repeat, max_repeat, max_time = self.repeat
         except (ValueError, TypeError):
@@ -612,7 +654,7 @@ class TimeBenchmark(Benchmark):
                 min_repeat = 1
                 max_repeat = 10
                 max_time = 20.0
-                if self.processes > 1:
+                if self.rounds > 1:
                     max_repeat //= 2
                     max_time /= 2.0
             else:
@@ -701,6 +743,57 @@ class TimeBenchmark(Benchmark):
         return samples, number
 
 
+class _SeparateProcessTimer(object):
+    subprocess_tmpl = textwrap.dedent('''
+        from __future__ import print_function
+        from timeit import timeit, default_timer as timer
+        print(repr(timeit(stmt="""{stmt}""", setup="""{setup}""", number={number}, timer=timer)))
+    ''').strip()
+
+    def __init__(self, func):
+        self.func = func
+
+    def timeit(self, number):
+        stmt = self.func()
+        if isinstance(stmt, tuple):
+            stmt, setup = stmt
+        else:
+            setup = ""
+        stmt = textwrap.dedent(stmt)
+        setup = textwrap.dedent(setup)
+        stmt = stmt.replace(r'"""', r'\"\"\"')
+        setup = setup.replace(r'"""', r'\"\"\"')
+
+        code = self.subprocess_tmpl.format(stmt=stmt, setup=setup, number=number)
+
+        res = subprocess.check_output([sys.executable, "-c", code])
+        return float(res.strip())
+
+
+class TimerawBenchmark(TimeBenchmark):
+    """
+    Represents a benchmark for tracking timing benchmarks run once in
+    a separate process.
+    """
+    name_regex = re.compile(
+        '^(Timeraw[A-Z_].+)|(timeraw_.+)$')
+
+    def _load_vars(self):
+        TimeBenchmark._load_vars(self)
+        self.number = int(_get_first_attr(self._attr_sources, 'number', 1))
+        del self.timer
+
+    def _get_timer(self, *param):
+        if param:
+            func = lambda: self.func(*param)
+        else:
+            func = self.func
+        return _SeparateProcessTimer(func)
+
+    def do_profile(self, filename=None):
+        raise ValueError("Raw timing benchmarks cannot be profiled")
+
+
 class MemBenchmark(Benchmark):
     """
     Represents a single benchmark for tracking the memory consumption
@@ -770,7 +863,7 @@ class TrackBenchmark(Benchmark):
 
 
 benchmark_types = [
-    TimeBenchmark, MemBenchmark, PeakMemBenchmark, TrackBenchmark
+    TimerawBenchmark, TimeBenchmark, MemBenchmark, PeakMemBenchmark, TrackBenchmark
 ]
 
 
@@ -862,6 +955,11 @@ def disc_modules(module_name, ignore_import_errors=False):
             traceback.print_exc()
             return
 
+    # Exclude sourceless .pyc/.pyo left around (py3 __pycache__
+    # behaves sensibly, so workaround only for py2)
+    if sys.version_info[0] == 2 and not inspect.getsourcefile(module):
+        return
+
     yield module
 
     if getattr(module, '__path__', None):
@@ -889,7 +987,8 @@ def disc_benchmarks(root, ignore_import_errors=False):
             (k, v) for k, v in module.__dict__.items()
             if not k.startswith('_')
         ):
-            if inspect.isclass(module_attr):
+            if (inspect.isclass(module_attr) and
+                    not inspect.isabstract(module_attr)):
                 for name, class_attr in inspect.getmembers(module_attr):
                     if (inspect.isfunction(class_attr) or
                             inspect.ismethod(class_attr)):
@@ -1016,8 +1115,23 @@ def main_check(args):
     sys.exit(0 if ok else 1)
 
 
+def set_cpu_affinity_from_params(extra_params):
+    affinity_list = extra_params.get('cpu_affinity', None)
+    if affinity_list is not None:
+        try:
+            set_cpu_affinity(affinity_list)
+        except BaseException as exc:
+            print("asv: setting cpu affinity {!r} failed: {!r}".format(
+                affinity_list, exc))
+
+
 def main_setup_cache(args):
-    (benchmark_dir, benchmark_id) = args
+    (benchmark_dir, benchmark_id, params_str) = args
+
+    extra_params = json.loads(params_str)
+
+    set_cpu_affinity_from_params(extra_params)
+
     benchmark = get_benchmark_from_name(benchmark_dir, benchmark_id)
     cache = benchmark.do_setup_cache()
     with open("cache.pickle", "wb") as fd:
@@ -1029,16 +1143,11 @@ def main_run(args):
 
     extra_params = json.loads(params_str)
 
+    set_cpu_affinity_from_params(extra_params)
+    extra_params.pop('cpu_affinity', None)
+
     if profile_path == 'None':
         profile_path = None
-
-    affinity_list = extra_params.pop('cpu_affinity', None)
-    if affinity_list is not None:
-        try:
-            set_cpu_affinity(affinity_list)
-        except BaseException as exc:
-            print("asv: setting cpu affinity {!r} failed: {!r}".format(
-                affinity_list, exc))
 
     benchmark = get_benchmark_from_name(
         benchmark_dir, benchmark_id, extra_params=extra_params)
@@ -1212,8 +1321,19 @@ def main_run_server(args):
             with io.open(stdout_file, 'r', errors='replace') as f:
                 out = f.read()
 
+            # Emulate subprocess
+            if os.WIFSIGNALED(status):
+                retcode = -os.WTERMSIG(status)
+            elif os.WIFEXITED(status):
+                retcode = os.WEXITSTATUS(status)
+            elif os.WIFSTOPPED(status):
+                retcode = -os.WSTOPSIG(status)
+            else:
+                # shouldn't happen, but fail silently
+                retcode = -128
+
             info = {'out': out,
-                    'errcode': -256 if is_timeout else status}
+                    'errcode': -256 if is_timeout else retcode}
 
             result_text = json.dumps(info)
             if sys.version_info[0] >= 3:
@@ -1271,9 +1391,9 @@ def main_timing(argv):
 
     if not args.json:
         asv.console.color_print(formatted, 'red')
-        asv.console.color_print("", 'default')
-        asv.console.color_print("\n".join("{}: {}".format(k, v) for k, v in sorted(stats.items())), 'default')
-        asv.console.color_print("samples: {}".format(result['samples']), 'default')
+        asv.console.color_print(u"", 'default')
+        asv.console.color_print(u"\n".join(u"{}: {}".format(k, v) for k, v in sorted(stats.items())), 'default')
+        asv.console.color_print(u"samples: {}".format(result['samples']), 'default')
     else:
         json.dump({'result': value,
                    'samples': result['samples'],

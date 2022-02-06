@@ -13,13 +13,14 @@ from asv import config
 from asv import results
 
 from . import tools
+from .tools import example_results
 
 
-def test_rm(tmpdir):
+def test_rm(tmpdir, example_results):
     tmpdir = six.text_type(tmpdir)
 
     shutil.copytree(
-        join(dirname(__file__), 'example_results'),
+        example_results,
         join(tmpdir, 'example_results'))
 
     conf = config.Config.from_json({
@@ -35,7 +36,7 @@ def test_rm(tmpdir):
             assert not key.startswith('time_quantity')
         for key in six.iterkeys(result.started_at):
             assert not key.startswith('time_quantity')
-        for key in six.iterkeys(result.ended_at):
+        for key in six.iterkeys(result.duration):
             assert not key.startswith('time_quantity')
 
     tools.run_asv_with_conf(conf, 'rm', '-y', 'commit_hash=05d283b9')

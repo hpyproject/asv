@@ -4,6 +4,7 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+import sys
 import os
 from os.path import join
 
@@ -11,14 +12,16 @@ import pytest
 import shutil
 import glob
 import datetime
+import textwrap
 
 from asv import results
 from asv import environment
 from asv import repo
 from asv import util
+from asv.commands.run import Run
 
 from . import tools
-from .tools import dummy_packages
+from .tools import dummy_packages, WIN
 from .test_workflow import basic_conf, generate_basic_conf
 
 
@@ -46,7 +49,8 @@ def test_set_commit_hash(capsys, existing_env_conf):
     r = repo.get_repo(conf)
     commit_hash = r.get_hash_from_name(r.get_branch_name())
 
-    tools.run_asv_with_conf(conf, 'run', '--set-commit-hash=' + commit_hash, _machine_file=join(tmpdir, 'asv-machine.json'))
+    tools.run_asv_with_conf(conf, 'run', '--set-commit-hash=' + r.get_branch_name(),
+                            _machine_file=join(tmpdir, 'asv-machine.json'))
 
     env_name = list(environment.get_environments(conf, None))[0].name
     result_filename = commit_hash[:conf.hash_length] + '-' + env_name + '.json'
@@ -127,8 +131,10 @@ def test_run_spec(basic_conf):
     expected_commits = (initial_commit, branch_commit)
     with open(os.path.join(tmpdir, 'hashes_to_benchmark'), 'w') as f:
         for commit in expected_commits:
-            f.write(commit)
-            f.write('\n')
+            f.write(commit + "\n")
+        f.write("master~1\n")
+        f.write("some-bad-hash-that-will-be-ignored\n")
+        expected_commits += (dvcs.get_hash("master~1"),)
     _test_run('HASHFILE:hashes_to_benchmark', [None], expected_commits)
 
 
@@ -172,13 +178,19 @@ def test_run_build_failure(basic_conf):
     data_ok = util.load_json(fn_ok)
 
     for data in (data_broken, data_ok):
-        assert data['started_at'][bench_name] >= timestamp
-        assert data['ended_at'][bench_name] >= data['started_at'][bench_name]
+        value = dict(zip(data['result_columns'], data['results'][bench_name]))
+        assert value['started_at'] >= timestamp
+        if data is data_broken:
+            assert 'duration' not in value
+        else:
+            assert value['duration'] >= 0
 
     assert len(data_broken['results']) == 1
     assert len(data_ok['results']) == 1
-    assert data_broken['results'][bench_name] is None
-    assert data_ok['results'][bench_name] == 42.0
+    assert data_broken['result_columns'][0] == 'result'
+    assert data_ok['result_columns'][0] == 'result'
+    assert data_broken['results'][bench_name][0] is None
+    assert data_ok['results'][bench_name][0] == [42.0]
 
     # Check that parameters were also saved
     assert data_broken['params'] == data_ok['params']
@@ -204,8 +216,10 @@ def test_run_with_repo_subdir(basic_conf_with_subdir):
     fn_results, = glob.glob(join(tmpdir, 'results_workflow', 'orangutan',
                                  '*-*.json'))  # avoid machine.json
     data = util.load_json(fn_results)
-    assert data['results'][bench_name] == {'params': [['1', '2']],
-                                           'result': [6, 6]}
+
+    value = dict(zip(data['result_columns'], data['results'][bench_name]))
+    assert value['params'] == [['1', '2']]
+    assert value['result'] == [6, 6]
 
 
 def test_benchmark_param_selection(basic_conf):
@@ -221,9 +235,10 @@ def test_benchmark_param_selection(basic_conf):
         results = util.load_json(glob.glob(join(
             tmpdir, 'results_workflow', 'orangutan', '*-*.json'))[0])
         # replacing NaN by 'n/a' make assertions easier
+        keys = results['result_columns']
+        value = dict(zip(keys, results['results']['params_examples.track_param_selection']))
         return ['n/a' if util.is_nan(item) else item
-                for item in results['results'][
-                    'params_examples.track_param_selection']['result']]
+                for item in value['result']]
 
     assert get_results() == [4, 'n/a', 5, 'n/a']
     tools.run_asv_with_conf(conf, 'run', '--show-stderr',
@@ -245,7 +260,7 @@ def test_run_append_samples(basic_conf):
     def run_it():
         tools.run_asv_with_conf(conf, 'run', "master^!",
                                 '--bench', 'time_examples.TimeSuite.time_example_benchmark_1',
-                                '--append-samples', '-a', 'repeat=(1, 1, 10.0)', '-a', 'processes=1',
+                                '--append-samples', '-a', 'repeat=(1, 1, 10.0)', '-a', 'rounds=1',
                                 '-a', 'number=1', '-a', 'warmup_time=0',
                                 _machine_file=machine_file)
 
@@ -256,12 +271,14 @@ def test_run_append_samples(basic_conf):
                   if fn != 'machine.json']
 
     data = util.load_json(result_fn)
-    assert data['results']['time_examples.TimeSuite.time_example_benchmark_1']['stats'][0] is not None
-    assert len(data['results']['time_examples.TimeSuite.time_example_benchmark_1']['samples'][0]) == 1
+    value = dict(zip(data['result_columns'], data['results']['time_examples.TimeSuite.time_example_benchmark_1']))
+    assert value['stats_q_25'][0] is not None
+    assert len(value['samples'][0]) == 1
 
     run_it()
     data = util.load_json(result_fn)
-    assert len(data['results']['time_examples.TimeSuite.time_example_benchmark_1']['samples'][0]) == 2
+    value = dict(zip(data['result_columns'], data['results']['time_examples.TimeSuite.time_example_benchmark_1']))
+    assert len(value['samples'][0]) == 2
 
 
 def test_cpu_affinity(basic_conf):
@@ -270,10 +287,9 @@ def test_cpu_affinity(basic_conf):
     # Only one environment
     conf.matrix = {}
 
-    # Tests multiple calls to "asv run --append-samples"
     tools.run_asv_with_conf(conf, 'run', "master^!",
                             '--bench', 'time_examples.TimeSuite.time_example_benchmark_1',
-                            '--cpu-affinity=0', '-a', 'repeat=(1, 1, 10.0)', '-a', 'processes=1',
+                            '--cpu-affinity=0', '-a', 'repeat=(1, 1, 10.0)', '-a', 'rounds=1',
                             '-a', 'number=1', '-a', 'warmup_time=0',
                             _machine_file=machine_file)
 
@@ -284,3 +300,110 @@ def test_cpu_affinity(basic_conf):
                   if fn != 'machine.json']
     data = util.load_json(result_fn)
     assert data['results']['time_examples.TimeSuite.time_example_benchmark_1']
+
+
+def test_env_matrix_value(basic_conf):
+    tmpdir, local, conf, machine_file = basic_conf
+
+    conf.matrix = {}
+
+    def check_env_matrix(env_build, env_nobuild):
+        conf.matrix = {"env": env_build, "env_nobuild": env_nobuild}
+
+        tools.run_asv_with_conf(conf, 'run', "master^!",
+                                '--bench', 'time_secondary.track_environment_value',
+                                _machine_file=machine_file)
+
+        # Check run produced a result
+        result_dir = join(tmpdir, 'results_workflow', 'orangutan')
+
+        result_fn1, = glob.glob(result_dir + '/*-SOME_TEST_VAR1.json')
+        result_fn2, = glob.glob(result_dir + '/*-SOME_TEST_VAR2.json')
+
+        data = util.load_json(result_fn1)
+        assert data['result_columns'][0] == 'result'
+        assert data['results']['time_secondary.track_environment_value'][0] == [1]
+
+        data = util.load_json(result_fn2)
+        assert data['results']['time_secondary.track_environment_value'][0] == [2]
+
+    check_env_matrix({}, {'SOME_TEST_VAR': ['1', '2']})
+    check_env_matrix({'SOME_TEST_VAR': ['1', '2']}, {})
+
+
+def test_parallel(basic_conf, dummy_packages):
+    tmpdir, local, conf, machine_file = basic_conf
+
+    if WIN and os.path.basename(sys.argv[0]).lower().startswith('py.test'):
+        # Multiprocessing in spawn mode can result to problems with py.test
+        # Find.run calls Setup.run in parallel mode by default
+        pytest.skip("Multiprocessing spawn mode on Windows not safe to run "
+                    "from py.test runner.")
+
+    conf.matrix = {
+        "req": dict(conf.matrix),
+        "env": {"SOME_TEST_VAR": ["1", "2"]},
+        "env_nobuild": {"SOME_OTHER_TEST_VAR": ["1", "2"]}
+    }
+
+    tools.run_asv_with_conf(conf, 'run', "master^!",
+                            '--bench', 'time_secondary.track_environment_value',
+                            '--parallel=2', _machine_file=machine_file)
+
+
+def test_filter_date_period(tmpdir, basic_conf):
+    tmpdir, local, conf, machine_file = basic_conf
+
+    dates = [
+        datetime.datetime(2001, 1, 1),
+        datetime.datetime(2001, 1, 2),
+        datetime.datetime(2001, 1, 8)
+    ]
+
+    dvcs = tools.generate_repo_from_ops(
+        tmpdir, 'git',
+        [("commit", j, dates[j]) for j in range(len(dates))])
+    commits = dvcs.get_branch_hashes()[::-1]
+
+    conf.repo = dvcs.path
+    conf.matrix = {}
+
+    tools.run_asv_with_conf(conf, 'run', 'master',
+                            '--date-period=1w',
+                            '--quick', '--show-stderr',
+                            '--bench=time_secondary.track_value',
+                            _machine_file=machine_file)
+
+    expected_commits = [commits[0], commits[2]]
+
+    fns = glob.glob(join(tmpdir, 'results_workflow', 'orangutan', '*-*.json'))
+
+    for commit in expected_commits:
+        assert any(os.path.basename(c).startswith(commit[:8]) for c in fns)
+
+    assert len(fns) == len(expected_commits)
+
+
+def test_format_durations():
+    durations = {'foo': 1, 'bar': 2, 'quux': 3}
+
+    msg = Run.format_durations(durations, 2)
+    expected = textwrap.dedent("""\
+    =========== ================
+     benchmark   total duration 
+    ----------- ----------------
+        quux         3.00s      
+        bar          2.00s      
+        ...           ...       
+       total         6.00s      
+    =========== ================""")
+    assert msg == expected
+
+
+def test_return_code_strict_mode(tmpdir, basic_conf):
+    tmpdir, local, conf, machine_file = basic_conf
+
+    res = tools.run_asv_with_conf(conf, 'run', 'master^!', '--quick',
+                                  '--strict', '--bench', 'TimeSecondary',
+                                  _machine_file=machine_file)
+    assert res == 2

@@ -1,14 +1,11 @@
 #!/usr/bin/env python
 
-import ez_setup
-ez_setup.use_setuptools()
-
-from setuptools import setup, Extension, Command
+from setuptools import setup, Extension
 from setuptools.command.test import test as TestCommand
 from setuptools.command.sdist import sdist
 from setuptools.command.build_ext import build_ext
 
-from distutils.errors import CCompilerError, DistutilsExecError, DistutilsPlatformError
+from distutils.errors import DistutilsError, CCompilerError, DistutilsExecError, DistutilsPlatformError
 
 import os
 import subprocess
@@ -45,7 +42,8 @@ class PyTest(TestCommand):
         if self.coverage:
             test_args += ['--cov', os.path.abspath('asv')]
         errno = pytest.main(test_args)
-        sys.exit(errno)
+        if errno != 0:
+            raise DistutilsError("Tests failed")
 
 
 class sdist_checked(sdist):
@@ -181,6 +179,18 @@ class optional_build_ext(build_ext):
             raise BuildFailed()
 
 
+try:
+    # Set default options for setuptools sphinx command;
+    # setup(command_options=...) can't specify two builders
+    from sphinx.setup_command import BuildDoc as BuildDocSphinx
+    class BuildDoc(BuildDocSphinx):
+        def initialize_options(self):
+            super(BuildDoc, self).initialize_options()
+            self.builder = ['html', 'man']
+except ImportError:
+    BuildDoc = None
+
+
 def run_setup(build_binary=False):
     version = get_version()
     git_hash = get_git_hash()
@@ -194,15 +204,9 @@ def run_setup(build_binary=False):
     write_version_file(os.path.join(basedir, 'asv', '_version.py'),
                        suffix, git_hash)
 
-    # Install entry points for making releases with zest.releaser
-    entry_points = {}
-    for hook in [('releaser', 'middle'), ('postreleaser', 'before')]:
-        hook_ep = 'zest.releaser.' + '.'.join(hook)
-        hook_name = 'asv.release.' + '.'.join(hook)
-        hook_func = 'asv._release:' + '_'.join(hook)
-        entry_points[hook_ep] = ['%s = %s' % (hook_name, hook_func)]
-
-    entry_points['console_scripts'] = ['asv = asv.main:main']
+    with open('requirements-dev.txt', 'r') as f:
+        tests_require = [x.strip() for x in f.read().splitlines()
+                         if not x.strip().startswith('#')]
 
     if build_binary:
         ext_modules = [Extension("asv._rangemedian", ["asv/_rangemedian.cpp"])]
@@ -212,15 +216,20 @@ def run_setup(build_binary=False):
     with open('README.rst', 'r') as f:
         long_description = f.read()
 
+    cmdclass = {'test': PyTest,
+                'build_ext': optional_build_ext,
+                'sdist': sdist_checked}
+
+    if BuildDoc is not None:
+        cmdclass['build_sphinx'] = BuildDoc
+
     setup(
         name="asv",
         version=version,
         packages=['asv',
                   'asv.commands',
                   'asv.plugins',
-                  'asv.extern',
-                  'asv._release'],
-        entry_points=entry_points,
+                  'asv.extern'],
         ext_modules = ext_modules,
 
         install_requires=[
@@ -228,7 +237,8 @@ def run_setup(build_binary=False):
         ],
 
         extras_require={
-            str('hg'): ["python-hglib>=1.5"]
+            str('hg'): ["python-hglib>=1.5"],
+            str('testing'): tests_require,
         },
 
         package_data={
@@ -247,15 +257,17 @@ def run_setup(build_binary=False):
             ]
         },
 
+        entry_points={
+            str('console_scripts'): ['asv = asv.main:main']
+        },
+
         python_requires='>=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*',
 
         zip_safe=False,
 
         # py.test testing
-        tests_require=['pytest'],
-        cmdclass={'test': PyTest,
-                  'build_ext': optional_build_ext,
-                  'sdist': sdist_checked},
+        tests_require=tests_require,
+        cmdclass=cmdclass,
 
         author="Michael Droettboom",
         author_email="mdroe@stsci.edu",

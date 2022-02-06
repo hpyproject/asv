@@ -8,6 +8,7 @@ import os
 import shutil
 import multiprocessing
 import datetime
+from collections import defaultdict
 
 import six
 
@@ -94,6 +95,7 @@ class Publish(Command):
     @classmethod
     def run(cls, conf, range_spec=None, pull=True):
         params = {}
+        env_vars = defaultdict(set)
         graphs = GraphSet()
         machines = {}
         benchmark_names = set()
@@ -148,6 +150,12 @@ class Publish(Command):
                     params.setdefault(key, set())
                     params[key].add(val)
 
+                for name, val in six.iteritems(results.env_vars):
+                    # Prefix them in case of name collision
+                    env_vars["env-{}".format(name)].add(val)
+
+            params.update(env_vars)
+
             if pull:
                 repo.pull()
             tags = repo.get_tags()
@@ -176,8 +184,9 @@ class Publish(Command):
 
                 # Print a warning message if we couldn't find the branch of a commit
                 if not len(branches_for_commit):
-                    msg = "Couldn't find %s in %s branches"
-                    log.warning(msg % (results.commit_hash, branches.keys()))
+                    msg = "Couldn't find {} in branches ({})"
+                    log.warning(msg.format(results.commit_hash[:conf.hash_length],
+                                           ", ".join(str(branch) for branch in branches.keys())))
 
                 for key in results.get_result_keys(benchmarks):
                     b = benchmarks[key]
@@ -194,6 +203,9 @@ class Publish(Command):
 
                     for branch in branches_for_commit:
                         cur_params = dict(results.params)
+                        cur_env = {'env-{}'.format(name): val
+                                   for name, val in six.iteritems(results.env_vars)}
+                        cur_params.update(cur_env)
                         cur_params['branch'] = repo.get_branch_name(branch)
 
                         # Backward compatibility, see above
@@ -222,7 +234,7 @@ class Publish(Command):
         log.info("Detecting steps")
         with log.indent():
             n_processes = multiprocessing.cpu_count()
-            pool = multiprocessing.Pool(n_processes)
+            pool = util.get_multiprocessing_pool(n_processes)
             try:
                 graphs.detect_steps(pool, dots=log.dot)
                 pool.close()

@@ -401,6 +401,9 @@ def detect_steps(y, w=None):
         if x is None or x != x:
             # None or NaN: missing data
             continue
+        if w is not None and w[j] is not None and (w[j] <= 0):
+            # non-positive weight: consider as missing data
+            continue
         index_map[len(y_filtered)] = j
         y_filtered.append(x)
 
@@ -438,7 +441,7 @@ def detect_steps(y, w=None):
     return steps
 
 
-def detect_regressions(steps, threshold=0):
+def detect_regressions(steps, threshold=0, min_size=2):
     """Detect regressions in a (noisy) signal.
 
     A regression means an upward step in the signal.  The value
@@ -455,6 +458,8 @@ def detect_regressions(steps, threshold=0):
         whose relative size is smaller than threshold, if they are not
         necessary to explain the difference between the best and the latest
         values.
+    min_size : int
+        Minimum number of commits in a regression to consider it.
 
     Returns
     -------
@@ -462,9 +467,11 @@ def detect_regressions(steps, threshold=0):
         Latest value
     best_value
         Best value
-    regression_pos : list of (before, after, value_before, value_after)
+    regression_pos : list of (before, after, value_before, best_value_after)
         List of positions between which the value increased. The first item
         corresponds to the last position at which the best value was obtained.
+        The last item indicates the best value found after the regression
+        (which is not always the value immediately following the regression).
 
     """
     if not steps:
@@ -475,17 +482,36 @@ def detect_regressions(steps, threshold=0):
 
     last_v = steps[-1][2]
     best_v = last_v
-    best_err = steps[-1][4]
+    thresholded_best_v = last_v
+    thresholded_best_err = steps[-1][4]
     prev_l = None
+    short_prev = None
 
     # Find upward steps that resulted to worsened value afterward
     for l, r, cur_v, cur_min, cur_err in reversed(steps):
-        if best_v - cur_v > max(cur_err, best_err, threshold * cur_v):
+        threshold_step = max(cur_err, thresholded_best_err, threshold * cur_v)
+
+        if thresholded_best_v > cur_v + threshold_step:
+            if r - l < min_size:
+                # Accept short intervals conditionally
+                short_prev = (thresholded_best_v, thresholded_best_err)
+
             regression_pos.append((r - 1, prev_l, cur_v, best_v))
+
+            thresholded_best_v = cur_v
+            thresholded_best_err = cur_err
+        elif short_prev is not None:
+            # Ignore the previous short interval, if the level
+            # is now back to where it was
+            if short_prev[0] <= cur_v + threshold_step:
+                regression_pos.pop()
+                thresholded_best_v, thresholded_best_err = short_prev
+            short_prev = None
+
         prev_l = l
+
         if cur_v < best_v:
             best_v = cur_v
-            best_err = cur_err
 
     regression_pos.reverse()
 
@@ -681,11 +707,11 @@ def solve_potts_autogamma(y, w, beta=None, **kw):
             """
             l = 1
             E_prev = y[0] - values[0]
-            s = abs(E_prev)
+            s = abs(E_prev) * w[0]
             for r, v in zip(rights, values):
-                for yv in y[l:r]:
+                for yv, wv in zip(y[l:r], w[l:r]):
                     E = yv - v
-                    s += abs(E - rho*E_prev)
+                    s += abs(E - rho*E_prev) * wv
                     E_prev = E
                 l = r
             return s
@@ -797,7 +823,7 @@ def merge_pieces(gamma, right, values, dists, mu_dist, max_size):
         prev_score = dist(l, right[j-1]-1) + dist(right[j-1], right[j]-1)
         new_off = 0
         for off in range(-max_size, max_size+1):
-            if right[j-1] + off - 1 <= l or right[j-1] + off >= right[j] - 1 or off == 0:
+            if right[j-1] + off - 1 < l or right[j-1] + off > right[j] - 1 or off == 0:
                 continue
             new_score = dist(l, right[j-1]+off-1) + dist(right[j-1]+off, right[j]-1)
             if new_score < prev_score:

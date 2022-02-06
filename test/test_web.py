@@ -29,7 +29,7 @@ except ImportError:
     pass
 
 from . import tools
-from .tools import browser, get_with_retry, WAIT_TIME, locked_cache_dir
+from .tools import browser, get_with_retry, WAIT_TIME, locked_cache_dir, WIN
 
 
 @pytest.fixture(scope="session")
@@ -76,14 +76,21 @@ def _rebuild_basic_html(basedir):
             'repo': join(basedir, 'repo'),
             'dvcs': 'git',
             'project': 'asv',
-            'matrix': {},
+            'matrix': {"env": {"SOME_TEST_VAR": ["1"]}},
             'regressions_first_commits': {
                 '.*': first_tested_commit_hash
             },
         })
 
+        if WIN:
+            # Tell conda to not use hardlinks: on Windows it's not possible
+            # to delete hard links to files in use, which causes problem when
+            # trying to cleanup environments during this test (since the
+            # same cache directory may get reused).
+            conf.matrix["env"]["CONDA_ALWAYS_COPY"] = ["True"]
+
         tools.run_asv_with_conf(conf, 'run', 'ALL',
-                                '--show-stderr', '--quick', '--bench=params_examples.*track_.*',
+                                '--show-stderr', '--quick', '--bench=params_examples[a-z0-9_.]*track_',
                                 _machine_file=machine_file)
 
         # Swap CPU info and obtain some results
@@ -97,7 +104,7 @@ def _rebuild_basic_html(basedir):
         util.write_json(machine_file, info, api_version=1)
 
         tools.run_asv_with_conf(conf, 'run', 'master~10..', '--steps=3',
-                                '--show-stderr', '--quick', '--bench=params_examples.*track_.*',
+                                '--show-stderr', '--quick', '--bench=params_examples[a-z0-9_.]*track_',
                                 _machine_file=machine_file)
 
         # Output
@@ -167,6 +174,8 @@ def test_web_regressions(browser, basic_html):
     html_dir, dvcs = basic_html
 
     bad_commit_hash = dvcs.get_hash('master~9')
+
+    ignore_exc = (NoSuchElementException, StaleElementReferenceException)
 
     browser.set_window_size(1200, 900)
 
@@ -263,6 +272,27 @@ def test_web_regressions(browser, basic_html):
 
         popover = browser.find_element_by_css_selector('div.popover-content')
         flotplot = browser.find_element_by_css_selector('canvas.flot-base')
+
+        # Check group/ungroup button functionality
+        group_button, = [button for button in browser.find_elements_by_xpath('//button')
+                         if button.text == "Group regressions"]
+        group_button.click()
+
+        def check(*args):
+            columns = browser.find_element_by_xpath('//table/thead/tr[1]').text
+            return columns == 'Benchmark Last date Commits Factor Best Current'
+
+        WebDriverWait(browser, WAIT_TIME, ignored_exceptions=ignore_exc).until(check)
+
+        ungroup_button, = [button for button in browser.find_elements_by_xpath('//button')
+                         if button.text == "Ungroup regressions"]
+        ungroup_button.click()
+
+        def check(*args):
+            columns = browser.find_element_by_xpath('//table/thead/tr[1]').text
+            return columns == 'Benchmark Date Commit Factor Before Best after'
+
+        WebDriverWait(browser, WAIT_TIME, ignored_exceptions=ignore_exc).until(check)
 
 
 @pytest.mark.flaky(reruns=1, reruns_delay=5)

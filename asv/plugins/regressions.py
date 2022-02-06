@@ -113,7 +113,9 @@ class Regressions(OutputPublisher):
             revision_timestamps[revision] = results.date
 
             # Time when the benchmark was run
-            for benchmark_name, timestamp in six.iteritems(results.ended_at):
+            for benchmark_name, timestamp in six.iteritems(results.started_at):
+                if timestamp is None:
+                    continue
                 key = (benchmark_name, revision)
                 run_timestamps[key] = timestamp
 
@@ -205,8 +207,9 @@ class Regressions(OutputPublisher):
                 # as the same one, as long as the benchmark name and
                 # commits match.
                 id_context = [name, revision_to_hash.get(rev1, ""), revision_to_hash.get(rev2, "")]
+                id_date = util.js_timestamp_to_datetime(revision_timestamps[rev2])
 
-                entries.append(feed.FeedEntry(title, updated, link, summary, id_context))
+                entries.append(feed.FeedEntry(title, updated, link, summary, id_context, id_date))
 
         entries.sort(key=lambda x: x.updated, reverse=True)
 

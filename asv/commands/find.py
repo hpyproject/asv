@@ -51,6 +51,7 @@ class Find(Command):
             "--invert", "-i", action="store_true",
             help="""Search for a decrease in the benchmark value,
             rather than an increase.""")
+        common_args.add_parallel(parser)
         common_args.add_show_stderr(parser)
         common_args.add_machine(parser)
         common_args.add_environment(parser)
@@ -65,12 +66,13 @@ class Find(Command):
         return cls.run(
             conf, args.range, args.bench,
             invert=args.invert, show_stderr=args.show_stderr,
+            parallel=args.parallel,
             machine=args.machine, env_spec=args.env_spec,
             launch_method=args.launch_method, **kwargs
         )
 
     @classmethod
-    def run(cls, conf, range_spec, bench, invert=False, show_stderr=False,
+    def run(cls, conf, range_spec, bench, invert=False, show_stderr=False, parallel=1,
             machine=None, env_spec=None, _machine_file=None, launch_method=None):
         params = {}
         machine_params = Machine.load(
@@ -89,7 +91,7 @@ class Find(Command):
             log.error("No commit hashes selected")
             return 1
 
-        environments = Setup.run(conf=conf, env_spec=env_spec)
+        environments = Setup.run(conf=conf, env_spec=env_spec, parallel=parallel)
         if len(environments) == 0:
             log.error("No environments selected")
             return 1
@@ -100,10 +102,16 @@ class Find(Command):
             log.error("'{0}' benchmark not found".format(bench))
             return 1
         elif len(benchmarks) > 1:
-            log.error("'{0}' matches more than one benchmark".format(bench))
-            return 1
+            exact_matches = benchmarks.filter_out([x for x in benchmarks if x != bench])
+            if len(exact_matches) == 1:
+                log.warning("'{0}' matches more than one benchmark, using exact match".format(bench))
+                benchmarks = exact_matches
+            else:
+                log.error("'{0}' matches more than one benchmark".format(bench))
+                return 1
 
         benchmark_name, = benchmarks.keys()
+        benchmark_type = benchmarks[benchmark_name]["type"]
 
         steps = int(math.log(len(commit_hashes)) / math.log(2))
 
@@ -137,6 +145,15 @@ class Find(Command):
 
             results[i] = result
 
+            # If we failed due to timeout in a timing benchmark, set
+            # runtime as the timeout to prevent falling back to linear
+            # search
+            errcode = res.errcode[benchmark_name]
+            if errcode == util.TIMEOUT_RETCODE and benchmark_type == "time":
+                timeout_limit = benchmarks[benchmark_name]['timeout']
+                results[i] = [r if r is not None else timeout_limit
+                              for r in results[i]]
+
             return results[i]
 
         def non_null_results(*results):
@@ -159,6 +176,9 @@ class Find(Command):
                     denom = abs(va) + abs(vb) + abs(vc)
                     if denom == 0:
                         denom = 1.0
+                    if invert:
+                        denom*=-1.0
+
                     results_ab.append((va - vb) / denom)
                     results_bc.append((vb - vc) / denom)
             return max(results_ab), max(results_bc)
@@ -203,9 +223,6 @@ class Find(Command):
 
             diff_b, diff_a = difference_3way(hi_result, mid_result, lo_result)
 
-            if invert:
-                diff_a *= -1.0
-                diff_b *= -1.0
 
             if diff_a >= diff_b:
                 return do_search(lo, mid)
@@ -215,6 +232,12 @@ class Find(Command):
         result = do_search(0, len(commit_hashes) - 1)
 
         commit_name = repo.get_decorated_hash(commit_hashes[result], 8)
-        log.info("Greatest regression found: {0}".format(commit_name))
+
+        if invert:
+            direction = "improvement"
+        else:
+            direction = "regression"
+
+        log.info("Greatest {0} found: {1}".format(direction, commit_name))
 
         return 0
