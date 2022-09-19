@@ -161,6 +161,7 @@ def add_bench(parser):
         'timeout': float,
         'version': str,
         'warmup_time': float,
+        'warmup_count': int,
         'repeat': parse_repeat,
         'number': int,
         'rounds': int,

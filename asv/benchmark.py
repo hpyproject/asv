@@ -359,6 +359,8 @@ class Benchmark:
         self._params = _get_first_attr(attr_sources, "params", [])
         self.param_names = _get_first_attr(attr_sources, "param_names", [])
         self._current_params = ()
+        self.warmup_count = 0
+        self.warmup_func = None
 
         # Enforce params format
         try:
@@ -445,11 +447,22 @@ class Benchmark:
         try:
             for setup in self._setups:
                 setup(*self._current_params)
+            self.warmup_process()
         except NotImplementedError as e:
             # allow skipping test
             print(f"asv: skipped: {e !r} ")
             return True
         return False
+
+    def warmup_process(self):
+        if self.warmup_count > 0 and self.warmup_func:
+            # Count based warmup
+            warmup_count = self.warmup_count
+            while warmup_count > 0:
+                self.warmup_func()
+                warmup_count -= 1
+            self.warmup_func = None
+
 
     def redo_setup(self):
         if not self._redo_setup_next:
@@ -512,6 +525,7 @@ class TimeBenchmark(Benchmark):
         self.sample_time = _get_first_attr(self._attr_sources, 'sample_time', 0.01)
         self.warmup_time = _get_first_attr(self._attr_sources, 'warmup_time', -1)
         self.timer = _get_first_attr(self._attr_sources, 'timer', wall_timer)
+        self.warmup_count = _get_first_attr(self._attr_sources, 'warmup_count', 0) # CHANGE 3 TO ZERO
 
     def do_setup(self):
         result = Benchmark.do_setup(self)
@@ -526,6 +540,8 @@ class TimeBenchmark(Benchmark):
         else:
             func = self.func
 
+        self.warmup_func = func
+
         timer = timeit.Timer(
             stmt=func,
             setup=self.redo_setup,
@@ -538,6 +554,10 @@ class TimeBenchmark(Benchmark):
         if warmup_time < 0:
             if '__pypy__' in sys.modules:
                 warmup_time = 1.0
+            elif '__graalpython__' in sys.modules:
+                if self.warmup_count == 0:
+                    self.warmup_count = 3
+                warmup_time = 5
             else:
                 # Transient effects exist also on CPython, e.g. from
                 # OS scheduling
@@ -577,6 +597,14 @@ class TimeBenchmark(Benchmark):
                          number, min_run_count):
 
         sample_time = self.sample_time
+        if self.warmup_count > 0:
+            # Warmup before deciding how many
+            # iterations needed for each run
+            warmup_count = self.warmup_count
+            while warmup_count > 0:
+                self._redo_setup_next = False
+                timer.timeit(number)
+                warmup_count -= 1
         start_time = wall_timer()
         run_count = 0
 

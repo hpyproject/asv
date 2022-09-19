@@ -156,6 +156,7 @@ def run_benchmarks(benchmarks, env, results=None,
         extra_params['repeat'] = 1
         extra_params['warmup_time'] = 0
         extra_params['rounds'] = 1
+        extra_params['warmup_count'] = 0
 
     if results is None:
         results = Results.unnamed()
