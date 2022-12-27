@@ -103,7 +103,8 @@ def run_benchmarks(benchmarks, env, results=None,
                    extra_params=None,
                    record_samples=False, append_samples=False,
                    run_rounds=None,
-                   launch_method=None):
+                   launch_method=None,
+                   benchmarks_obj=None):
     """
     Run all of the benchmarks in the given `Environment`.
 
@@ -157,6 +158,7 @@ def run_benchmarks(benchmarks, env, results=None,
         extra_params['warmup_time'] = 0
         extra_params['rounds'] = 1
         extra_params['warmup_count'] = 0
+        extra_params['do_maxrss'] = 0
 
     if results is None:
         results = Results.unnamed()
@@ -352,16 +354,29 @@ def run_benchmarks(benchmarks, env, results=None,
                 benchmark_durations[name] = (ended_at - started_at).total_seconds()
 
             # Save result
-            results.add_result(benchmark, res,
+            results.add_result(benchmark, res[0],
                                selected_idx=selected_idx,
                                started_at=started_at,
                                duration=benchmark_durations[name],
                                record_samples=(not is_final or record_samples),
                                append_samples=(name in previous_result_keys))
+            if res[1]: # maxrss
+                benchmark_maxrss = benchmark.copy()
+                benchmark_maxrss['name'] += '_maxrss'
+                benchmark_maxrss['type'] = 'peakmemory'
+                benchmark_maxrss['unit'] = 'bytes'
+                benchmarks_obj._all_benchmarks[benchmark_maxrss['name']] = benchmark_maxrss
+                benchmarks_obj.save()
+                results.add_result(benchmark_maxrss, res[1],
+                                selected_idx=selected_idx,
+                                started_at=started_at,
+                                duration=benchmark_durations[name],
+                                record_samples=(not is_final or record_samples),
+                                append_samples=(name in previous_result_keys))
 
             previous_result_keys.add(name)
 
-            if all(r is None for r in res.result):
+            if all(r is None for r in res[0].result):
                 failed_benchmarks.add(name)
 
             # Log result
@@ -501,8 +516,11 @@ def run_benchmark(benchmark, spawner, profile,
     samples = []
     number = []
     profiles = []
+    result_maxrss = []
+    ignored_maxrss = []
     stderr = ''
     errcode = 0
+    has_maxrss = False
 
     if benchmark['params']:
         param_iter = enumerate(itertools.product(*benchmark['params']))
@@ -515,6 +533,8 @@ def run_benchmark(benchmark, spawner, profile,
             samples.append(None)
             number.append(None)
             profiles.append(None)
+            result_maxrss.append(util.nan)
+            ignored_maxrss.append(None)
             continue
 
         if isinstance(extra_params, list):
@@ -526,28 +546,44 @@ def run_benchmark(benchmark, spawner, profile,
             benchmark, spawner, param_idx,
             extra_params=cur_extra_params, profile=profile,
             cwd=cwd)
+        
+        r, r_maxrss = res
+        result += r.result
+        samples += r.samples
+        number += r.number
 
-        result += res.result
-        samples += res.samples
-        number += res.number
+        profiles.append(r.profile)
 
-        profiles.append(res.profile)
+        if r_maxrss:
+            result_maxrss += r_maxrss.result
+            has_maxrss = True
+        else:
+            result_maxrss.append(util.nan)
+        ignored_maxrss.append(None)
 
-        if res.stderr:
+        if r.stderr:
             stderr += "\n\n"
-            stderr += res.stderr
+            stderr += r.stderr
 
-        if res.errcode != 0:
-            errcode = res.errcode
+        if r.errcode != 0:
+            errcode = r.errcode
 
-    return BenchmarkResult(
+    return (BenchmarkResult(
         result=result,
         samples=samples,
         number=number,
         errcode=errcode,
         stderr=stderr.strip(),
-        profile=_combine_profile_data(profiles)
-    )
+        profile=_combine_profile_data(profiles)),
+
+        # maxrss
+        None if not has_maxrss else BenchmarkResult(
+                result=result_maxrss,
+                samples=ignored_maxrss,
+                number=ignored_maxrss,
+                errcode=errcode,
+                stderr=stderr.strip(),
+                profile=None))
 
 
 def _run_benchmark_single_param(benchmark, spawner, param_idx,
@@ -612,6 +648,7 @@ def _run_benchmark_single_param(benchmark, spawner, param_idx,
             result = None
             samples = None
             number = None
+            maxrss = None
         else:
             with open(result_file.name, 'r') as stream:
                 data = stream.read()
@@ -624,14 +661,15 @@ def _run_benchmark_single_param(benchmark, spawner, param_idx,
                 out += f"\n\nasv: failed to parse benchmark result: {exc}\n"
 
             # Special parsing for timing benchmark results
-            if isinstance(data, dict) and 'samples' in data and 'number' in data:
+            if isinstance(data, dict) and 'samples' in data and 'number' in data and 'maxrss' in data:
                 result = True
                 samples = data['samples']
                 number = data['number']
+                maxrss = data['maxrss']
             else:
                 result = data
                 samples = None
-                number = None
+                maxrss = None
 
         if benchmark['params'] and out:
             params, = itertools.islice(itertools.product(*benchmark['params']),
@@ -645,14 +683,22 @@ def _run_benchmark_single_param(benchmark, spawner, param_idx,
         else:
             profile_data = None
 
-        return BenchmarkResult(
-            result=[result],
-            samples=[samples],
-            number=[number],
-            errcode=errcode,
-            stderr=out.strip(),
-            profile=profile_data)
+        return (BenchmarkResult(
+                    result=[result],
+                    samples=[samples],
+                    number=[number],
+                    errcode=errcode,
+                    stderr=out.strip(),
+                    profile=profile_data),
 
+                # maxrss
+                None if maxrss is None else BenchmarkResult(
+                    result=[maxrss],
+                    samples=[None],
+                    number=[None],
+                    errcode=errcode,
+                    stderr=out.strip(),
+                    profile=profile_data))
     except KeyboardInterrupt:
         spawner.interrupt()
         raise util.UserError("Interrupted.")

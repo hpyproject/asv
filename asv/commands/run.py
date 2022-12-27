@@ -495,7 +495,7 @@ class Run(Command):
                                 record_samples=(record_samples or force_record_samples),
                                 append_samples=(append_samples or force_append_samples),
                                 run_rounds=run_rounds,
-                                launch_method=launch_method)
+                                launch_method=launch_method, benchmarks_obj=benchmarks)
                         else:
                             skip_benchmarks(benchmark_set, env, results=result)
 

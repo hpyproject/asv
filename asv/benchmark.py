@@ -526,6 +526,7 @@ class TimeBenchmark(Benchmark):
         self.warmup_time = _get_first_attr(self._attr_sources, 'warmup_time', -1)
         self.timer = _get_first_attr(self._attr_sources, 'timer', wall_timer)
         self.warmup_count = _get_first_attr(self._attr_sources, 'warmup_count', 0) # CHANGE 3 TO ZERO
+        self.do_maxrss = _get_first_attr(self._attr_sources, 'do_maxrss', 0)
 
     def do_setup(self):
         result = Benchmark.do_setup(self)
@@ -550,6 +551,11 @@ class TimeBenchmark(Benchmark):
         return timer
 
     def run(self, *param):
+        maxrss = None
+        if self.do_maxrss == 1:
+            self.func(*param)
+            maxrss = get_maxrss()
+
         warmup_time = self.warmup_time
         if warmup_time < 0:
             if '__pypy__' in sys.modules:
@@ -589,9 +595,11 @@ class TimeBenchmark(Benchmark):
                                                 warmup_time=warmup_time,
                                                 number=self.number,
                                                 min_run_count=self.min_run_count)
+        if self.do_maxrss == 2:
+            maxrss = get_maxrss()
 
-        samples = [s / number for s in samples]
-        return {'samples': samples, 'number': number}
+        samples = [s/number for s in samples]
+        return {'samples': samples, 'number': number, 'maxrss' : maxrss}
 
     def benchmark_timing(self, timer, min_repeat, max_repeat, max_time, warmup_time,
                          number, min_run_count):

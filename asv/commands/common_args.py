@@ -157,9 +157,17 @@ def add_bench(parser):
 
         return affinity_list
 
+    def parse_maxrss(value):
+        if value == 'once' or value == '1':
+            return 1
+        if value == 'full' or value == '2':
+            return 2
+        return 0
+
     converters = {
         'timeout': float,
         'version': str,
+        'do_maxrss': parse_maxrss,
         'warmup_time': float,
         'warmup_count': int,
         'repeat': parse_repeat,
@@ -181,6 +189,16 @@ def add_bench(parser):
         choices=tuple(converters.keys()), converters=converters,
         help=("Set CPU affinity for running the benchmark, in format: "
               "0 or 0,1,2 or 0-3. Default: not set"))
+
+    parser.add_argument(
+        "--maxrss", action=DictionaryArgAction, dest="attribute",
+        dict_dest="do_maxrss",
+        choices=tuple(converters.keys()), converters=converters,
+        help=("""Calculate maxrss of a timed benchmarks. 
+                 This will only collect maxrss instead of time.
+                 Using 'once' will run the benchmark once.
+                 Using 'full' Calculate maxrss of a timed benchmarks
+                 with all the configured options, e.g. repeat, warmup, etc"""))
 
 
 def add_machine(parser):
