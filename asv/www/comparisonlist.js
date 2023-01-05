@@ -46,7 +46,21 @@ $(document).ready(function() {
                     table_cache['comparisonlist'] = '#' + table_name;
                     $("#comparisonlist-body .message").remove();
                     $("#comparisonlist-body").append(table);
-                    table.show();         
+                    table.show();
+                    var coll = document.getElementsByClassName("collapsible");
+                    var i;
+
+                    for (i = 0; i < coll.length; i++) {
+                        coll[i].addEventListener("click", function() {
+                            this.classList.toggle("active");
+                            var content = this.nextElementSibling;
+                            if (content.style.display === "block") {
+                                content.style.display = "none";
+                            } else {
+                                content.style.display = "block";
+                            }
+                        });
+                    }
                 });
             }
         }
@@ -143,13 +157,14 @@ $(document).ready(function() {
     function construct_machines_comparison_benchmark_table(data) {
         var index = $.asv.master_json;
 
-        var table = $('<table class="table table-hover"/>');
+        var content_list = $('<div>')
 
+        $.each(data, function(bench_type, type_data) {
         /* Form a new table */
-        var machines = data.machines;
-        var benchmarks = data.benchmarks;
-        var average = data.average;
-        var baseline_machine = data.baseline;
+        var machines = type_data.machines;
+        var benchmarks = type_data.benchmarks;
+        var average = type_data.average;
+        var baseline_machine = type_data.baseline;
 
         var second_row = $('<tr/>');
         var total = $('<td class="stats"/>');
@@ -165,6 +180,8 @@ $(document).ready(function() {
             }
             
         });
+
+        var table = $('<table class="table table-hover"/>');
         var table_head = $('<thead><tr>' +
                            '<th data-sort="string">Benchmark</th>' + machines_head +
                            '</tr></thead>');
@@ -285,8 +302,16 @@ $(document).ready(function() {
         /* Finalize */
         table.append(table_body);
         // setup_sort(table);
+    
+        var type_table_button = $('<button type="button" class="collapsible">' + bench_type + '</button>');
+        var type_table_content = $('<div class="content">');
+        type_table_content.append(table);
+        content_list.append(type_table_button);
+        content_list.append(type_table_content);
+        // return table;
+        });
 
-        return table;
+        return content_list;
     }
 
     function setup_sort(table) {

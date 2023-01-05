@@ -46,12 +46,25 @@ time_units = [
     ['`C`', 'centuries', 60 * 60 * 24 * 7 * 52 * 100]
 ]
 
+mem_units = [
+    ['', 'bytes', 1],
+    ['k', 'kilobytes', 1000],
+    ['M', 'megabytes', 1000000],
+    ['G', 'gigabytes', 1000000000],
+    ['T', 'terabytes', 1000000000000]
+]
+
 def pretty_time_unit(x, unit):
     if unit == 'seconds':
         for i in range(len(time_units) - 1):
             if abs(x) < time_units[i+1][2]:
                 return '%.3f' % (x / time_units[i][2]) + time_units[i][0]
         return 'inf'
+    elif unit == 'bytes':
+        for i in range(len(mem_units) - 1):
+            if abs(x) < mem_units[i+1][2]:
+                return '%.3f' % (x / mem_units[i][2]) + mem_units[i][0]
+        return '%d' % x + mem_units[i][0]
     else:
         return '%.3f' % x + unit
 
@@ -69,11 +82,13 @@ class ComparisonList(OutputPublisher):
         if conf.baseline_machine:
             baseline_machine_idx = machines.index(conf.baseline_machine)
 
-        result = {
-            "machines" : machines,
-            "benchmarks" : None,
-        }
-        benchmarks_result = []
+        result_types = ['time', 'peakmemory']
+        all_results = {}
+        for bench_type in result_types:
+            all_results[bench_type] = {
+                "machines" : machines,
+                "benchmarks" : [],
+            }
 
         # Investigate all benchmarks
         for benchmark_name, benchmark in sorted(six.iteritems(benchmarks)):
@@ -83,6 +98,7 @@ class ComparisonList(OutputPublisher):
 
             # For parameterized benchmarks, consider each combination separately
             for idx, benchmark_param in benchmark_param_iter(benchmark):
+                bench_type = benchmark['type'] # time or peakmem
                 pretty_name = benchmark_name
 
                 if benchmark.get('pretty_name'):
@@ -143,27 +159,29 @@ class ComparisonList(OutputPublisher):
                         benchmark_data["last_err"][machine_idx] = last_err
                         benchmark_data["last_rev"][machine_idx] = last_rev
                 if benchmark_data and best_val:
-                    benchmarks_result.append(benchmark_data)
+                    all_results[bench_type]["benchmarks"].append(benchmark_data)
 
         if baseline_machine_idx != -1:
-            num_benchmarks = len(benchmarks_result)
-            cmp_list = [0.] * num_machines
-            for bench_idx in range(num_benchmarks):
-                values = benchmarks_result[bench_idx]["last_value"]
-                b = values[baseline_machine_idx]
-                if b:
-                    for machine_idx in range(num_machines):
-                        v = values[machine_idx]
-                        if v:
-                            p = (v - b) / b * 100
-                            cmp_list[machine_idx] += p
-                            benchmarks_result[bench_idx]["cmp_percent"][machine_idx] = p
+            for bench_type in result_types:
+                benchmarks_result = all_results[bench_type]["benchmarks"]
+                num_benchmarks = len(benchmarks_result)
+                cmp_list = [0.] * num_machines
+                for bench_idx in range(num_benchmarks):
+                    values = benchmarks_result[bench_idx]["last_value"]
+                    b = values[baseline_machine_idx]
+                    if b:
+                        for machine_idx in range(num_machines):
+                            v = values[machine_idx]
+                            if v:
+                                p = (v - b) / b * 100
+                                cmp_list[machine_idx] += p
+                                benchmarks_result[bench_idx]["cmp_percent"][machine_idx] = p
 
-            benchmarks_average_cmp = [None] * num_machines
-            for machine_idx in range(num_machines):
-                benchmarks_average_cmp[machine_idx] = cmp_list[machine_idx]/num_benchmarks
-            result["average"] = benchmarks_average_cmp
-            result["baseline"] = baseline_machine_idx
+                benchmarks_average_cmp = [None] * num_machines
+                for machine_idx in range(num_machines):
+                    benchmarks_average_cmp[machine_idx] = cmp_list[machine_idx]/num_benchmarks
+                all_results[bench_type]["average"] = benchmarks_average_cmp
+                all_results[bench_type]["baseline"] = baseline_machine_idx
                 
 
         def machine_idx_sort(row):
@@ -179,37 +197,40 @@ class ComparisonList(OutputPublisher):
                     return idx + v
 
             return idx
-        result["benchmarks"] = sorted(benchmarks_result, key=machine_idx_sort)
+        for bench_type in result_types:
+            all_results[bench_type]["benchmarks"] = sorted(all_results[bench_type]["benchmarks"], key=machine_idx_sort)
         # Write results to file
-        util.write_json(os.path.join(conf.html_dir, "comparison.json"), result, compact=True)
+        util.write_json(os.path.join(conf.html_dir, "comparison.json"), all_results, compact=True)
 
         if conf.generate_markdown:
             # Generate a markdown page
             with open(os.path.join(conf.html_dir, "comparison.md"), "w") as fp:
-                machines = result["machines"]
-                num_machines = len(machines)
                 fp.write('# Benchmark Machine\n')
                 fp.write('* CPU: %s\n' % list(graphs.get_params()["cpu"])[0])
                 fp.write('* CPU Cores: %s\n' % list(graphs.get_params()["num_cpu"])[0])
                 fp.write('* OS: %s\n' % list(graphs.get_params()["os"])[0])
                 fp.write('* RAM: %dGB\n' % (int(list(graphs.get_params()["ram"])[0])//1000000))
                 fp.write('\n\n')
-                fp.write('# Results\n')
-                fp.write('| No. |' + '|'.join(machines + ["Benchmarks"]) + '|\n')
-                fp.write('| :-- |' + '|'.join([":--"] * (num_machines + 1)) + '|\n')
-                if baseline_machine_idx != -1:
-                    avg = ['%.2f%%' % v for v in result["average"]]
-                    fp.write('| - |' + '|'.join(avg + ["Average"]) + '|\n')
-                count = 1
-                for benchmark in result["benchmarks"]:
-                    if None in benchmark["last_value"]:
-                        continue
-                    unit = benchmarks[benchmark["name"]]["unit"]
-                    row = '| %d ' % count
-                    count += 1
-                    for machine_idx in range(num_machines):
-                        row += '|' + pretty_time_unit(benchmark["last_value"][machine_idx], unit)
-                        if baseline_machine_idx != -1 and baseline_machine_idx != machine_idx:
-                            row += ' `%.2f%%`' % benchmark["cmp_percent"][machine_idx]
-                    row += '|' + benchmark["pretty_name"] + '|\n'
-                    fp.write(row)
+                for bench_type in result_types:
+                    machines = all_results[bench_type]["machines"]
+                    num_machines = len(machines)
+                    fp.write('# %s results:\n' % bench_type)
+                    fp.write('| No. |' + '|'.join(machines + ["Benchmarks"]) + '|\n')
+                    fp.write('| :-- |' + '|'.join([":--"] * (num_machines + 1)) + '|\n')
+                    if baseline_machine_idx != -1:
+                        avg = ['%.2f%%' % v for v in all_results[bench_type]["average"]]
+                        fp.write('| - |' + '|'.join(avg + ["Average"]) + '|\n')
+                    count = 1
+                    for benchmark in all_results[bench_type]["benchmarks"]:
+                        if None in benchmark["last_value"]:
+                            continue
+                        unit = benchmarks[benchmark["name"]]["unit"]
+                        row = '| %d ' % count
+                        count += 1
+                        for machine_idx in range(num_machines):
+                            row += '|' + pretty_time_unit(benchmark["last_value"][machine_idx], unit)
+                            if baseline_machine_idx != -1 and baseline_machine_idx != machine_idx:
+                                row += ' `%.2f%%`' % benchmark["cmp_percent"][machine_idx]
+                        row += '|' + benchmark["pretty_name"] + '|\n'
+                        fp.write(row)
+                    fp.write('\n\n\n')

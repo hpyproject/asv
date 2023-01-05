@@ -66,3 +66,27 @@
 #comparisonlist-body table tbody td.change-date {
     white-space: nowrap;
 }
+
+#comparisonlist-body .collapsible {
+    background-color: #eee;
+    color: #444;
+    cursor: pointer;
+    padding: 18px;
+    width: 100%;
+    border: none;
+    text-align: left;
+    outline: none;
+    font-size: 15px;
+  }
+  
+#comparisonlist-body .active, .collapsible:hover {
+    background-color: #ccc;
+}
+  
+#comparisonlist-body .content {
+    padding: 0 18px;
+    display: none;
+    overflow: hidden;
+    background-color: #f1f1f1;
+}
+  
