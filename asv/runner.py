@@ -669,6 +669,7 @@ def _run_benchmark_single_param(benchmark, spawner, param_idx,
             else:
                 result = data
                 samples = None
+                number = None
                 maxrss = None
 
         if benchmark['params'] and out:
