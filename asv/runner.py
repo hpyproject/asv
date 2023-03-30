@@ -533,7 +533,7 @@ def run_benchmark(benchmark, spawner, profile,
             samples.append(None)
             number.append(None)
             profiles.append(None)
-            result_maxrss.append(util.nan)
+            result_maxrss.append(math.nan)
             ignored_maxrss.append(None)
             continue
 
@@ -558,7 +558,7 @@ def run_benchmark(benchmark, spawner, profile,
             result_maxrss += r_maxrss.result
             has_maxrss = True
         else:
-            result_maxrss.append(util.nan)
+            result_maxrss.append(math.nan)
         ignored_maxrss.append(None)
 
         if r.stderr:
