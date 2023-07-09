@@ -114,7 +114,8 @@ Timing benchmarks
   benchmark. If not specified, ``warmup_time`` defaults to 0.1 seconds
   (on PyPy, the default is 1.0 sec).
 
-- ``warmup_count``: TODO.
+- ``warmup_count``: ``asv`` will run the benchmark this number of time(s)
+  before starting to run the actual benchmark.
 
 - ``rounds``: How many rounds to run the benchmark in (default: 2).
   The rounds run different timing benchmarks in an interleaved order,

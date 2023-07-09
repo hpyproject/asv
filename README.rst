@@ -27,6 +27,57 @@ By using the following markdown::
 
   [![asv](http://img.shields.io/badge/benchmarked%20by-asv-blue.svg?style=flat)](http://your-url-here/)
 
+
+
+**HPy project contributions**:
+
+* Add support for reporing max-rss to asv::
+
+    --maxrss ATTRIBUTE    
+        
+        Calculate maxrss of a timed benchmarks. 
+        This will only collect maxrss instead of time. 
+        Using 'once' will run the benchmark once.
+        Using 'full' Calculate maxrss of a timed 
+        benchmarks with all the configured options, e.g. repeat, warmup, etc
+
+e.g.::
+
+    asv run --python=python3 -v -e --set-commit-hash 42xxxfoo_project_commit_hashxxx42 -b 'foo_benchmark*' --maxrss once
+
+* add warmup count option to Airspeed Velocity framework::
+
+    --attribute warmup_count=, -a warmup_count=
+        will run the benchmark this number of time(s), 
+        e.g. ``warmup_count=10``, before starting to 
+        run the actual benchmark.
+
+e.g.::
+
+    asv run --python=python3 -v -e --set-commit-hash 42xxxfoo_project_commit_hashxxx42 -b 'foo_benchmark*' -a warmup_count=1
+
+
+* Add machines comparison list to Airspeed Velocity framework::
+
+    
+    --baseline-machine BASELINE_MACHINE
+        Optional baseline comparisons between machines. 
+        Provide machine name
+
+e.g.::
+
+    # adjust foo project to use configuration1
+    asv run --python=python3 -v -e --set-commit-hash 42xxxfoo_project_commit_hashxxx42 -b 'foo_benchmark*' -m configuration1
+    # adjust foo project to use configuration2
+    asv run --python=python3 -v -e --set-commit-hash 42xxxfoo_project_commit_hashxxx42 -b 'foo_benchmark*' -m configuration2
+    # adjust foo project to use configuration3
+    asv run --python=python3 -v -e --set-commit-hash 42xxxfoo_project_commit_hashxxx42 -b 'foo_benchmark*' -m configuration3
+    asv publish --baseline-machine configuration1 --generate-markdown
+    asv preview
+
+
+
+
 License: `BSD three-clause license
 <http://opensource.org/licenses/BSD-3-Clause>`__.
 
